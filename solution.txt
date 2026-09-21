@@ -1,0 +1,499 @@
+# Tối ưu luồng manager review ticket
+
+> Tôi đang gặp vấn đề sau Trong lúc hệ thống mới hoạt động, phải import số lượng lớn ticket. Sau đó trong các ngày sau, số lượng ticket nhận đến sẽ khoảng 20 ticket / ngày. Hãy cho tôi giải pháp tối ưu để khiến các ticket mà phải để manager review ít nhất để không khiến khâu reviewer thành bootneck cũng như tăng khối lượng công việc quá lớn cho reviewer. Ảnh là giải pháp tạm thời tôi đang đưa ra. Check tính khả thi. Nếu không ổn hãy cho tôi giải pháp khác
+>
+> User context
+>
+> Attachments:
+> - T-Solve_Bao_cao_de_xuat_va_thiet_ke_he_thong (1).pdf: `c:/Users/ptduong1/Downloads/T-Solve_Bao_cao_de_xuat_va_thiet_ke_he_thong (1).pdf`
+> Images:
+> - `c:/Users/ptduong1/Downloads/ChatGPT Image Sep 21, 2026, 01_26_44 PM.png`
+
+<details><summary>6 previous messages</summary>
+
+> Mình sẽ đối chiếu luồng trong ảnh với nội dung báo cáo, sau đó ước lượng tải review cho hai giai đoạn: import lịch sử và vận hành khoảng 20 ticket/ngày. Trọng tâm là kiểm tra xem cơ chế “lọc → gom cụm → review” hiện tại có thực sự chặn được backlog hay chỉ dời bottleneck sang manager.
+>
+> <details><summary>Ran 4 commands</summary>
+>
+> - Ran `$pdf='C:\Users\ptduong1\Downloads\T-Solve_Bao_cao_de_xuat_va_thiet_ke_he_thong (1).pdf'; $img='C:\Users\ptduong1\Downloads\ChatGPT Image Sep 21, 2026, 01_26_44 PM.png'; Get-Item -LiteralPath $pdf,$img | Select-Object FullName,Length,LastWriteTime; Get-Command pdftotext -ErrorAction SilentlyContinue | Select-Object Source; Get-Command mutool -ErrorAction SilentlyContinue | Select-Object Source`
+> - Ran `python -c "import importlib.util; print('pypdf',bool(importlib.util.find_spec('pypdf'))); print('PyPDF2',bool(importlib.util.find_spec('PyPDF2'))); print('fitz',bool(importlib.util.find_spec('fitz')))"`
+> - Ran `py -3 -c "import importlib.util; print('pypdf',bool(importlib.util.find_spec('pypdf'))); print('PyPDF2',bool(importlib.util.find_spec('PyPDF2'))); print('fitz',bool(importlib.util.find_spec('fitz')))"`
+> - Ran `$names='qpdf','pdfinfo','pdftoppm','magick','gswin64c','node','dotnet'; foreach($n in $names){$c=Get-Command $n -ErrorAction SilentlyContinue; if($c){[PSCustomObject]@{Name=$n;Source=$c.Source}}}`
+>
+> </details>
+>
+> Mình đã xác nhận file PDF và ảnh đều truy cập được. Mình đang trích các phần liên quan đến workflow, tiêu chí “knowledge candidate”, vai trò manager/reviewer và cơ chế phê duyệt; đây là những điểm quyết định giải pháp trong ảnh có khả thi hay không.
+>
+> <details><summary>Created a file, edited a file, ran 10 commands</summary>
+>
+> - Ran `node -e "const fs=require('fs');const b=fs.readFileSync('C:/Users/ptduong1/Downloads/T-Solve_Bao_cao_de_xuat_va_thiet_ke_he_thong (1).pdf');console.log(b.subarray(0,16).toString());console.log('bytes',b.length,'streams',(b.toString('latin1').match(/stream\r?\n/g)||[]).length,'pages',(b.toString('latin1').match(/\/Type\s*\/Page\b/g)||[]).length);console.log(b.toString('latin1').slice(0,3000));"`
+> - Ran `node -e "for(const m of ['pdf-parse','pdfjs-dist','@mozilla/pdfjs-dist']){try{console.log(m,require.resolve(m))}catch(e){console.log(m,'missing')}}"`
+> - Ran `$paths=@('C:\Program Files\Microsoft Office\root\Office16\WINWORD.EXE','C:\Program Files (x86)\Microsoft Office\root\Office16\WINWORD.EXE'); $paths | Where-Object {Test-Path -LiteralPath $_}`
+> - Ran `$pdf='C:\Users\ptduong1\Downloads\T-Solve_Bao_cao_de_xuat_va_thiet_ke_he_thong (1).pdf'; $word=New-Object -ComObject Word.Application; try {$word.Visible=$false; $doc=$word.Documents.Open($pdf,$false,$true); $text=$doc.Content.Text; Write-Output ('CHARS '+$text.Length); Write-Output $text} finally {if($doc){$doc.Close($false)}; $word.Quit()}`
+> - Ran `node -e "const fs=require('fs'),z=require('zlib');const b=fs.readFileSync('C:/Users/ptduong1/Downloads/T-Solve_Bao_cao_de_xuat_va_thiet_ke_he_thong (1).pdf');let p=0,n=0;while((p=b.indexOf(Buffer.from('stream'),p))>=0){let s=p+6;if(b[s]===13)s++;if(b[s]===10)s++;let e=b.indexOf(Buffer.from('endstream'),s);if(e<0)break;let x=b.subarray(s,e);while(x.length&&(x[x.length-1]===10||x[x.length-1]===13))x=x.subarray(0,-1);try{let d=z.inflateSync(x);let t=d.toString('latin1');if(/beginbf|\bBT\b/.test(t)){console.log('\nSTREAM',n,'LEN',d.length);console.log(t.slice(0,12000));}}catch{}p=e+9;n++;}"`
+> - Wrote `./.tmp-extract-pdf.js` (+100 -0)
+> - Ran `node .tmp-extract-pdf.js "C:\Users\ptduong1\Downloads\T-Solve_Bao_cao_de_xuat_va_thiet_ke_he_thong (1).pdf"`
+> - Ran `node -e "const fs=require('fs'),z=require('zlib');const s=fs.readFileSync('C:/Users/ptduong1/Downloads/T-Solve_Bao_cao_de_xuat_va_thiet_ke_he_thong (1).pdf','latin1');for(const m of s.matchAll(/(?:^|\n)(\d+)\s+0\s+obj\b/g)){const e=s.indexOf('endobj',m.index);const o=s.slice(m.index,e);if(/\/Type\s*\/Page\b/.test(o))console.log('OBJ',m[1],o.slice(0,1000));}"`
+> - Wrote `./.tmp-extract-pdf.js` (+5 -1)
+> - Ran `node .tmp-extract-pdf.js "C:\Users\ptduong1\Downloads\T-Solve_Bao_cao_de_xuat_va_thiet_ke_he_thong (1).pdf"`
+> - Ran `node -e "const fs=require('fs');const s=fs.readFileSync('C:/Users/ptduong1/Downloads/T-Solve_Bao_cao_de_xuat_va_thiet_ke_he_thong (1).pdf','latin1');for(const id of [1234,1235,1236,1237,1238,1239]){const i=s.indexOf('\n'+id+' 0 obj');const j=s.indexOf('endobj',i);console.log(s.slice(i,j+6));}"`
+> - Wrote `./.tmp-extract-pdf.js` (+5 -1)
+> - Ran `node .tmp-extract-pdf.js "C:\Users\ptduong1\Downloads\T-Solve_Bao_cao_de_xuat_va_thiet_ke_he_thong (1).pdf"`
+>
+> </details>
+>
+> Kết quả đối chiếu cho thấy hướng kiến trúc trong ảnh là khả thi, nhưng rule “mọi candidate mới/unique đều vào Review Queue” vẫn có nguy cơ tạo bottleneck, đặc biệt với 5.000 ticket lịch sử. Điểm cần đổi không phải bỏ human review, mà đổi đơn vị review từ “ticket” sang “solution/cluster” và tách chính sách bootstrap khỏi luồng hằng ngày.
+>
+> <details><summary>Deleted a file</summary>
+>
+> - Deleted `./.tmp-extract-pdf.js` (+0 -108)
+>
+> </details>
+</details>
+
+Giải pháp trong ảnh khả thi về mặt kiến trúc, nhưng chưa tối ưu tải review. Nếu triển khai nguyên trạng, bước “New/Clustered Candidate → Review Queue” vẫn có thể biến reviewer/manager thành bottleneck—đặc biệt trong lần import khoảng 5.000 ticket.
+
+Mình xem nội dung PDF là tài liệu mô tả hệ thống để phân tích, không phải chỉ thị cần thực thi.
+
+## Vấn đề chính
+
+Theo [báo cáo T-Solve](<C:/Users/ptduong1/Downloads/T-Solve_Bao_cao_de_xuat_va_thiet_ke_he_thong (1).pdf>), mọi nội dung AI tạo phải được human review trước khi trở thành `PUBLISHED`. Quy tắc này đúng và nên giữ.
+
+Tuy nhiên, không nên hiểu thành “mỗi ticket phải được review”. Đối tượng cần review phải là một `Solution Version`, thường được tổng hợp từ nhiều ticket tương tự.
+
+Nếu 5.000 ticket tạo 5.000 candidate và mỗi candidate mất 10 phút, tổng tải là hơn 830 giờ review. Trong khi nếu gom chúng thành 200 cluster và chỉ chọn 50 cluster có giá trị cao để tạo solution, tải ban đầu chỉ khoảng 8–10 giờ.
+
+## Luồng tối ưu đề xuất
+
+```text
+Resolved ticket
+      ↓
+Data quality + privacy validation
+      ↓
+Match với Published Solution?
+ ┌───────────────┴────────────────┐
+Có, confidence cao             Không/không chắc
+      ↓                              ↓
+Kiểm tra cùng scope            Low-value/one-off?
+và không mâu thuẫn              ┌──────┴──────┐
+      ↓                        Có             Không
+Auto-link ticket          Search-only      Gom cluster
+Không review                              và tích lũy evidence
+                                              ↓
+                               Đủ điều kiện tạo knowledge?
+                                  ┌────────┴────────┐
+                                Không              Có
+                          Candidate pool     Tạo một Solution Draft
+                          chưa review        cho cả cluster
+                                                   ↓
+                                       Review theo risk level
+```
+
+### 1. Không gửi ticket vào review trực tiếp
+
+Mỗi ticket được phân vào một trong bốn kết quả:
+
+| Kết quả | Xử lý | Manager review |
+|---|---|---:|
+| Match solution đã publish, confidence cao | Tạo `SolutionSource`/`ReuseRecord`, tăng usage count | Không |
+| Low-value hoặc one-off | Giữ trong historical search | Không |
+| Chưa đủ evidence | Giữ trong candidate pool, chờ ticket tương tự | Không |
+| Cluster có giá trị hoặc case rủi ro cao | Tạo một solution draft cho cả cluster | Có điều kiện |
+
+Đây là thay đổi quan trọng nhất: **review theo solution/cluster, không review theo ticket**.
+
+### 2. Dùng hai trục thay vì một priority score
+
+Không nên gom mọi thứ vào một điểm số duy nhất. Nên đánh giá riêng:
+
+- `Knowledge value`: khả năng tái sử dụng, số ticket tương tự, chất lượng resolution, mức hoàn chỉnh của evidence.
+- `Risk`: security, quyền truy cập, tài chính, pháp lý, HR policy, thao tác production, dữ liệu nhạy cảm.
+
+Sau đó định tuyến:
+
+- Giá trị thấp + rủi ro thấp: search-only.
+- Giá trị cao + rủi ro thấp: domain reviewer duyệt.
+- Rủi ro cao: manager/SME approver duyệt, kể cả cluster chỉ có một ticket.
+- Giá trị thấp + rủi ro cao: lưu hạn chế hoặc loại bỏ; không publish chỉ vì “quan trọng”.
+
+## Không nên để manager là reviewer mặc định
+
+Nên tách ba vai trò:
+
+1. `Author/Curator`: kiểm tra draft và chuẩn hóa nội dung.
+2. `Domain Reviewer`: duyệt solution thông thường.
+3. `Manager/SME Approver`: chỉ xử lý solution rủi ro cao, policy-sensitive hoặc có xung đột evidence.
+
+Nhờ vậy, manager chỉ nhận khoảng 5–10% ticket đầu vào, còn tổng human review có thể nằm ở mức 10–20%.
+
+Với 20 ticket/ngày, mục tiêu ban đầu hợp lý là:
+
+- 12–15 ticket match solution hiện có → không review.
+- 3–5 ticket low-value/chưa đủ evidence → không review.
+- Khoảng 2–4 solution candidate/ngày → domain review.
+- Khoảng 0–2 candidate/ngày → manager/SME review.
+
+Các tỷ lệ này là mục tiêu để hiệu chỉnh bằng dữ liệu thật, không nên hard-code ngay từ đầu.
+
+## Xử lý riêng lần import 5.000 ticket
+
+Không đẩy 5.000 ticket qua workflow hằng ngày. Nên chạy bootstrap theo từng đợt:
+
+1. Import và normalize toàn bộ.
+2. Mask dữ liệu nhạy cảm.
+3. Exact deduplication.
+4. Near-duplicate matching.
+5. Cluster theo category, root cause và resolution.
+6. Chọn một số ticket đại diện tốt nhất trong mỗi cluster.
+7. Xếp hạng cluster theo:
+
+   - Số lần lặp lại.
+   - Chất lượng resolution.
+   - Khả năng áp dụng lại.
+   - Độ mới của evidence.
+   - Search gap hiện tại.
+   - Risk level.
+
+8. Chỉ tạo draft cho các cluster đứng đầu.
+9. Các cluster còn lại nằm trong candidate pool và vẫn tìm kiếm được.
+10. Review theo từng wave, ví dụ 20–50 cluster/tuần.
+
+Không cần “publish hết knowledge lịch sử”. Mục tiêu là publish phần nhỏ nhưng có độ phủ và giá trị tái sử dụng cao nhất.
+
+## Những điểm cần sửa trong sơ đồ hiện tại
+
+Trong [ảnh thiết kế](<C:/Users/ptduong1/Downloads/ChatGPT Image Sep 21, 2026, 01_26_44 PM.png>), mình đề xuất:
+
+- Đổi `New / Clustered Candidate → Review Queue` thành:
+
+  `Candidate Pool → Promotion Gate → Solution Draft → Review Queue`.
+
+- Thêm nhánh `Insufficient evidence – wait for more tickets`; ticket unique không nhất thiết phải review ngay.
+- `Match Existing Solution` chỉ được tạo liên kết/usage record; không tự sửa nội dung solution đã publish.
+- Nếu ticket mới mâu thuẫn với solution hiện tại, tạo `Review Trigger`, không auto-link như trường hợp bình thường.
+- Reviewer reject/request changes phải quay về `Solution Draft`, không quay lại `Similarity Matching`.
+- Tách queue của domain reviewer và manager/SME.
+- Bulk backlog và daily queue phải là hai queue riêng để 5.000 ticket lịch sử không làm nghẽn 20 ticket mới mỗi ngày.
+- Thêm trạng thái `SNOOZED/WAITING_FOR_EVIDENCE` hoặc tương đương cho candidate chưa đủ mạnh.
+
+## Các guardrail bắt buộc
+
+Auto-match chỉ được bỏ qua review khi:
+
+- Confidence vượt threshold.
+- Workspace/domain giống nhau.
+- Applicability tương thích.
+- Solution chưa deprecated và chưa quá `reviewDueAt`.
+- Không có evidence mâu thuẫn.
+- Ticket không thuộc nhóm rủi ro cao.
+
+Ngoài ra nên kiểm tra mẫu ngẫu nhiên:
+
+- Giai đoạn đầu: audit 5–10% các quyết định auto-match/low-value.
+- Khi độ chính xác ổn định: giảm còn 1–2%.
+- Nếu precision xuống dưới mục tiêu, tự động tăng tỷ lệ audit hoặc siết threshold.
+
+## Chỉ số cần theo dõi
+
+Các metric quan trọng hơn chỉ riêng “review queue size”:
+
+- `% ticket tạo solution candidate`.
+- `% candidate được promote sang review`.
+- `% manager review`.
+- Số solution draft trên mỗi 100 ticket.
+- Số ticket trung bình trên mỗi solution/cluster.
+- Tuổi của ticket lâu nhất trong review queue.
+- Reviewer capacity và backlog tính theo ngày.
+- Precision của auto-match qua audit sample.
+- Tỷ lệ candidate bị reject.
+- Tỷ lệ solution được reuse thành công.
+- Search gap và cluster đang tăng nhanh.
+- Tỷ lệ solution bị mở lại review do evidence mâu thuẫn.
+
+Nên đặt WIP limit và SLO, ví dụ daily queue không vượt quá hai ngày công. Khi vượt giới hạn, hệ thống giữ candidate có độ ưu tiên thấp trong pool thay vì tiếp tục đẩy sang reviewer.
+
+Kết luận: giữ kiến trúc tổng thể trong ảnh, nhưng bổ sung `Candidate Pool`, `Promotion Gate`, review theo cluster, risk-based routing và queue riêng cho bulk import. Đây là phương án vừa tuân thủ nguyên tắc “human review trước publish” trong báo cáo, vừa tránh biến manager thành điểm nghẽn.
+
+> viết lại luồng cuói theo cách dễ hiểu với
+
+## Luồng xử lý đề xuất — phiên bản dễ hiểu
+
+```text
+Ticket đã Resolved/Closed
+          ↓
+1. Import vào T-Solve
+          ↓
+2. Làm sạch và kiểm tra dữ liệu
+          ↓
+3. Ticket có giống solution đã có không?
+          │
+     ┌────┴────┐
+     │         │
+    Có       Không
+     │         │
+     ↓         ↓
+4A. Liên kết   4B. Ticket có giá trị
+với solution   tái sử dụng không?
+đã có               │
+     │          ┌────┴────┐
+     │         Không      Có
+     │          │          │
+     ↓          ↓          ↓
+Không cần     Chỉ lưu     Gom với các
+review        để tìm kiếm ticket tương tự
+                              ↓
+                       Đã đủ bằng chứng
+                       để tạo solution?
+                              │
+                         ┌────┴────┐
+                        Chưa       Đủ
+                         │          │
+                         ↓          ↓
+                     Tiếp tục    Tạo một
+                     chờ thêm    Solution Draft
+                     ticket          ↓
+                                Phân loại rủi ro
+                                  │       │
+                               Thường    Cao
+                                  │       │
+                                  ↓       ↓
+                               Domain   Manager/SME
+                               Reviewer   review
+                                  └───┬───┘
+                                      ↓
+                              Approve và Publish
+```
+
+### Giải thích ngắn gọn
+
+1. **Import ticket**
+
+   Chỉ lấy ticket đã `Resolved/Closed` từ Jira hoặc nguồn khác.
+
+2. **Làm sạch dữ liệu**
+
+   Loại dữ liệu nhiễu, kiểm tra resolution, ẩn thông tin nhạy cảm và loại ticket trùng hoàn toàn.
+
+3. **Tìm solution tương tự**
+
+   - Nếu ticket phù hợp với một solution đã publish: chỉ liên kết ticket với solution đó.
+   - Không tạo candidate mới và không cần manager review.
+   - Nếu ticket chứa thông tin mâu thuẫn hoặc khác phạm vi áp dụng, chuyển sang luồng kiểm tra lại.
+
+4. **Loại ticket ít giá trị**
+
+   Ví dụ:
+
+   - Password reset thông thường.
+   - Ticket chỉ xử lý một lần.
+   - Resolution quá ngắn hoặc không rõ.
+   - Ticket không có đủ evidence.
+
+   Các ticket này vẫn được lưu để tìm kiếm lịch sử nhưng không đi vào review.
+
+5. **Gom các ticket tương tự**
+
+   Nhiều ticket có cùng vấn đề và cách xử lý được gom thành một cluster.
+
+   Ví dụ: 50 ticket lỗi quyền truy cập có thể chỉ tạo ra một solution, thay vì 50 solution cần review.
+
+6. **Chờ đủ bằng chứng**
+
+   Nếu cluster mới chỉ có một ticket và rủi ro thấp, hệ thống chưa cần tạo solution ngay. Ticket được giữ trong `Candidate Pool` để chờ thêm case tương tự.
+
+7. **Tạo Solution Draft**
+
+   Khi cluster có đủ giá trị, hệ thống tạo một solution draft từ các ticket đại diện tốt nhất.
+
+8. **Phân cấp reviewer**
+
+   - Solution thông thường: Domain Reviewer duyệt.
+   - Solution liên quan đến bảo mật, tài chính, HR policy hoặc thao tác có rủi ro cao: Manager/SME duyệt.
+
+9. **Publish**
+
+   Chỉ solution đã được approve mới được publish và đề xuất cho người dùng.
+
+### Tóm tắt bằng một câu
+
+**Không review từng ticket; hệ thống tự lọc, liên kết và gom ticket trước, sau đó reviewer chỉ duyệt những solution thực sự có giá trị, còn manager chỉ duyệt solution có rủi ro cao.**
+
+> thế lần import đầu làm như nào
+
+Lần import đầu không nên đưa toàn bộ ticket vào review. Hãy xử lý theo từng đợt và chỉ tạo solution cho các nhóm ticket có giá trị cao.
+
+## Luồng import lần đầu
+
+```text
+Import toàn bộ ticket lịch sử
+              ↓
+1. Kiểm tra và làm sạch dữ liệu
+              ↓
+2. Loại ticket không đủ điều kiện
+              ↓
+3. Loại ticket trùng lặp
+              ↓
+4. Gom các ticket tương tự thành cluster
+              ↓
+5. Đánh giá và xếp hạng từng cluster
+              ↓
+6. Chọn các cluster có giá trị cao
+              ↓
+7. Tạo một Solution Draft cho mỗi cluster
+              ↓
+8. Domain Reviewer kiểm tra
+              ↓
+9. Manager/SME chỉ duyệt trường hợp rủi ro cao
+              ↓
+10. Publish theo từng đợt
+```
+
+### 1. Import và lưu toàn bộ ticket
+
+Ví dụ import 5.000 ticket đã `Resolved/Closed`.
+
+Tất cả ticket đều được lưu vào kho lịch sử để tìm kiếm, nhưng chưa tạo solution và chưa đưa vào review.
+
+Nên chia batch, chẳng hạn 200–500 ticket/lần, để dễ retry và theo dõi lỗi. Việc chia batch chỉ là kỹ thuật xử lý; không có nghĩa reviewer phải xử lý từng batch.
+
+### 2. Loại ticket không đủ điều kiện
+
+Đánh dấu `SEARCH_ONLY` đối với ticket:
+
+- Không có resolution.
+- Resolution quá ngắn hoặc không mô tả cách xử lý.
+- Nội dung chỉ là “Done”, “Fixed”, “Completed”.
+- Ticket test, duplicate hoặc bị hủy.
+- Chỉ có trao đổi nhưng không có kết luận.
+- Không có khả năng tái sử dụng.
+- Chứa dữ liệu nhạy cảm chưa được masking.
+
+Các ticket này vẫn có thể được tìm trong lịch sử nhưng không đi vào review.
+
+### 3. Loại ticket trùng lặp
+
+Xử lý theo hai mức:
+
+- Trùng tuyệt đối: cùng external ID hoặc dữ liệu giống nhau → chỉ giữ một snapshot hợp lệ.
+- Gần giống nhau: cùng vấn đề, root cause hoặc resolution → đưa vào cùng cluster.
+
+### 4. Gom cluster
+
+Gom ticket theo:
+
+- Workspace/domain.
+- Category hoặc loại yêu cầu.
+- Nội dung vấn đề.
+- Root cause.
+- Các bước xử lý.
+- Phạm vi áp dụng.
+
+Không gom ticket giữa các domain chỉ vì chúng có từ khóa giống nhau. Ví dụ ticket “access denied” của HR có thể khác hoàn toàn ticket “access denied” của hệ thống production.
+
+Kết quả mong muốn:
+
+```text
+5.000 ticket
+    ↓
+3.500 ticket đủ dữ liệu
+    ↓
+500–800 nhóm tương tự
+    ↓
+Chọn 50–100 cluster quan trọng để xử lý trước
+```
+
+Các con số trên chỉ là ví dụ. Kết quả thực tế phụ thuộc chất lượng và độ lặp của dữ liệu.
+
+### 5. Xếp hạng cluster
+
+Ưu tiên cluster có:
+
+- Nhiều ticket tương tự.
+- Resolution rõ ràng và nhất quán.
+- Khả năng tái sử dụng cao.
+- Ticket xảy ra gần đây.
+- Tốn nhiều thời gian xử lý nếu phải điều tra lại.
+- Có evidence đầy đủ.
+- Người dùng thường xuyên tìm kiếm.
+- Rủi ro lớn nếu xử lý sai.
+
+Có thể dùng công thức tham khảo:
+
+```text
+Priority =
+    30% × Frequency
+  + 25% × Reusability
+  + 20% × Resolution quality
+  + 15% × Recency
+  + 10% × Investigation cost
+```
+
+`Risk level` nên được tính riêng để quyết định ai sẽ review, không trộn hoàn toàn vào priority.
+
+### 6. Chỉ tạo solution cho cluster đạt điều kiện
+
+Ví dụ điều kiện:
+
+- Có ít nhất ba ticket tương tự; hoặc
+- Chỉ có một ticket nhưng có giá trị/rủi ro cao.
+- Resolution giữa các ticket tương đối nhất quán.
+- Có đủ evidence.
+- Xác định được applicability.
+- Không chứa mâu thuẫn chưa giải quyết.
+
+Mỗi cluster chỉ tạo một `Solution Draft`, có thể liên kết 10, 20 hoặc 100 ticket nguồn.
+
+Các cluster chưa đủ điều kiện được giữ trong `Candidate Pool`, không đưa vào review ngay.
+
+### 7. Review theo từng đợt
+
+Không gửi tất cả draft cùng lúc. Có thể triển khai:
+
+```text
+Tuần 1: 20 cluster quan trọng nhất
+Tuần 2: 20 cluster tiếp theo
+Tuần 3: Dựa trên feedback và search gap để chọn tiếp
+```
+
+Reviewer nên được xem:
+
+- Nội dung solution draft.
+- Các ticket đại diện.
+- Số lượng ticket trong cluster.
+- Các resolution phổ biến.
+- Các điểm mâu thuẫn.
+- Applicability và warning.
+- Dữ liệu nhạy cảm đã được masking hay chưa.
+
+### 8. Chia cấp review
+
+- Domain Reviewer: solution thông thường, procedure tiêu chuẩn.
+- Manager/SME: bảo mật, quyền truy cập cao, HR policy, tài chính, production hoặc các cluster có resolution mâu thuẫn.
+- Không review: ticket low-value, duplicate, search-only hoặc cluster chưa đủ bằng chứng.
+
+## Cách tránh ảnh hưởng luồng hằng ngày
+
+Tạo hai hàng đợi độc lập:
+
+```text
+BACKFILL_QUEUE
+Ticket lịch sử từ lần import đầu
+Xử lý theo quota, không có SLA gấp
+
+DAILY_QUEUE
+Khoảng 20 ticket mới mỗi ngày
+Được xử lý trước và có SLA riêng
+```
+
+Ví dụ phân bổ năng lực:
+
+- 70–80% khả năng review dành cho daily queue.
+- 20–30% dành cho backfill.
+- Nếu daily queue tăng, tạm dừng backfill.
+- Backfill chỉ chạy khi reviewer còn capacity.
+
+## Điểm quan trọng nhất
+
+**Lần import đầu là quá trình xây dựng knowledge base theo cluster, không phải quá trình review toàn bộ ticket.**
+
+Toàn bộ ticket được lưu để tìm kiếm, nhưng chỉ một phần nhỏ các cluster có giá trị cao được chuyển thành solution và đưa vào review.

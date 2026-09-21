@@ -1,0 +1,147 @@
+@model DashboardViewModel
+@{
+    ViewData["Title"] = "Knowledge Operations";
+    var state = Model.State;
+    var latest = state.Runs.FirstOrDefault();
+    var pendingReviews = state.Reviews.Where(x => x.Decision == ReviewDecision.Pending).OrderByDescending(x => x.CreatedAt).ToList();
+    var recentTickets = state.Tickets.OrderByDescending(x => x.ImportedAt).Take(12).ToList();
+    var topClusters = state.Clusters.OrderByDescending(x => x.KnowledgeValue).Take(10).ToList();
+}
+
+<section class="hero" id="overview">
+    <div>
+        <div class="eyebrow"><span class="live-dot"></span> KNOWLEDGE OPERATIONS</div>
+        <h1>From resolved tickets<br />to trusted answers.</h1>
+        <p class="hero-copy">Import resolved ticket history, remove noise, cluster recurring outcomes and send only high-value solution drafts to the right reviewer.</p>
+        <div class="hero-actions">
+            <form asp-action="BulkImport" method="post"><button class="btn btn-primary btn-lg" type="submit">Import 500 historical tickets</button></form>
+            <form asp-action="DailySync" method="post"><button class="btn btn-quiet btn-lg" type="submit">Sync 10 daily tickets</button></form>
+            <form asp-action="Reset" method="post" onsubmit="return confirm('Reset all demo data?')"><button class="btn btn-link-danger" type="submit">Reset demo</button></form>
+        </div>
+        <form asp-action="ImportExcel" method="post" enctype="multipart/form-data" class="excel-import">
+            <label for="excel-file">Excel import</label>
+            <input id="excel-file" name="file" type="file" accept=".xlsx,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" required />
+            <button class="btn btn-quiet" type="submit">Import .xlsx</button>
+            <small>First worksheet; required columns: summary, description, comment.</small>
+        </form>
+    </div>
+    <aside class="connection-card">
+        <div class="connection-head"><span>Jira connection</span><span class="status-pill status-ok">● Ready</span></div>
+        <div class="connection-mode">@Model.Jira.Mode</div>
+        <dl>
+            <div><dt>Project</dt><dd>@Model.Jira.ProjectKey</dd></div>
+            <div><dt>Source</dt><dd>@Model.Jira.BaseUrl</dd></div>
+            <div><dt>Policy</dt><dd>Resolved / Closed only</dd></div>
+        </dl>
+        @if (!Model.Jira.IsConfigured) { <p class="connection-note">Safe demo mode is active. Configure environment variables to switch to Jira Cloud.</p> }
+    </aside>
+</section>
+
+@if (!string.IsNullOrWhiteSpace(Model.Notice)) { <div class="alert alert-success app-alert">@Model.Notice</div> }
+@if (!string.IsNullOrWhiteSpace(Model.Error)) { <div class="alert alert-danger app-alert">@Model.Error</div> }
+
+<section class="metric-grid" aria-label="Key metrics">
+    <article class="metric-card"><span>Imported tickets</span><strong>@state.Tickets.Count</strong><small>Idempotent ticket snapshots</small></article>
+    <article class="metric-card"><span>Knowledge clusters</span><strong>@state.Clusters.Count</strong><small>Recurring outcomes grouped</small></article>
+    <article class="metric-card"><span>Published solutions</span><strong>@Model.PublishedSolutions</strong><small>Human-reviewed knowledge</small></article>
+    <article class="metric-card accent"><span>Review reduction</span><strong>@Model.ReviewReduction.ToString("P1")</strong><small>@state.Reviews.Count review item(s) / @state.Tickets.Count ticket(s)</small></article>
+</section>
+
+<section class="section-block" id="pipeline">
+    <div class="section-heading">
+        <div><div class="eyebrow">PIPELINE HEALTH</div><h2>One pipeline, two operating lanes</h2></div>
+        @if (latest is not null) { <span class="muted">Last run @latest.CompletedAt.ToLocalTime().ToString("dd/MM HH:mm") · @latest.Mode</span> }
+    </div>
+    <div class="pipeline-grid">
+        <div class="flow-card"><div class="flow-title"><span class="flow-number">01</span><div><strong>Raw import</strong><small>@(latest?.Connector ?? "Jira / Excel") + source reference</small></div></div><div class="flow-value">@(latest?.Received ?? 0)</div></div>
+        <div class="flow-arrow">→</div>
+        <div class="flow-card"><div class="flow-title"><span class="flow-number">02</span><div><strong>Clean & qualify</strong><small>Mask PII, normalize, quality gate</small></div></div><div class="flow-split"><span><b>@(latest?.Blocked ?? 0)</b> blocked</span><span><b>@(latest?.SearchOnly ?? 0)</b> search only</span></div></div>
+        <div class="flow-arrow">→</div>
+        <div class="flow-card"><div class="flow-title"><span class="flow-number">03</span><div><strong>Match & cluster</strong><small>Deduplicate before review</small></div></div><div class="flow-split"><span><b>@(latest?.AutoLinked ?? 0)</b> linked</span><span><b>@(latest?.Duplicates ?? 0)</b> duplicate</span></div></div>
+        <div class="flow-arrow">→</div>
+        <div class="flow-card highlight"><div class="flow-title"><span class="flow-number">04</span><div><strong>Review solution</strong><small>One review per promoted cluster</small></div></div><div class="flow-split"><span><b>@Model.PendingDomainReviews</b> domain</span><span><b>@Model.PendingManagerReviews</b> manager</span></div></div>
+    </div>
+</section>
+
+<section class="two-column section-block">
+    <div class="panel" id="review-queue">
+        <div class="panel-head"><div><div class="eyebrow">HUMAN CONTROL</div><h2>Review queue</h2></div><span class="count-badge">@pendingReviews.Count pending</span></div>
+        @if (pendingReviews.Count == 0)
+        {
+            <div class="empty-state"><div class="empty-icon">✓</div><strong>No pending reviews</strong><span>Import historical tickets to create ranked solution drafts.</span></div>
+        }
+        else
+        {
+            <div class="review-list">
+            @foreach (var review in pendingReviews.Take(8))
+            {
+                var solution = state.Solutions.First(x => x.Id == review.SolutionId);
+                var cluster = state.Clusters.First(x => x.Id == solution.ClusterId);
+                var evidenceTickets = state.Tickets.Where(x => cluster.TicketIds.Contains(x.Id)).Take(5).ToList();
+                <article class="review-item">
+                    <div class="review-top"><span class="risk risk-@solution.Risk.ToString().ToLowerInvariant()">@solution.Risk risk</span><span class="role">@(review.RequiredRole == ReviewRole.ManagerSme ? "Manager / SME" : "Domain reviewer")</span></div>
+                    <h3>@solution.Title</h3><p>@solution.Problem</p>
+                    <div class="evidence-line"><b>@solution.SourceTicketCount</b> source tickets <span>·</span> review due @solution.ReviewDueAt.ToString("dd/MM/yyyy")</div>
+                    <details class="solution-draft">
+                        <summary>View solution draft</summary>
+                        <div class="draft-field"><strong>Problem</strong><p>@solution.Problem</p></div>
+                        <div class="draft-field"><strong>Procedure</strong><p>@solution.Procedure</p></div>
+                        <div class="draft-field"><strong>Applicability</strong><p>@solution.Applicability</p></div>
+                        <div class="draft-field"><strong>Warning</strong><p>@solution.Warning</p></div>
+                        <div class="draft-field">
+                            <strong>Source evidence</strong>
+                            <ul class="evidence-list">
+                                @foreach (var ticket in evidenceTickets)
+                                {
+                                    <li>@ticket.ExternalId · @ticket.CleanTitle</li>
+                                }
+                            </ul>
+                            @if (solution.SourceTicketCount > evidenceTickets.Count)
+                            {
+                                <small>Showing 5 of @solution.SourceTicketCount source tickets.</small>
+                            }
+                        </div>
+                    </details>
+                    <div class="review-actions">
+                        <form asp-action="Review" method="post"><input type="hidden" name="id" value="@review.Id" /><input type="hidden" name="decision" value="approve" /><button class="btn btn-approve" type="submit">Approve & publish</button></form>
+                        <form asp-action="Review" method="post"><input type="hidden" name="id" value="@review.Id" /><input type="hidden" name="decision" value="reject" /><button class="btn btn-reject" type="submit">Reject</button></form>
+                    </div>
+                </article>
+            }
+            </div>
+        }
+    </div>
+
+    <div class="panel">
+        <div class="panel-head"><div><div class="eyebrow">PROMOTION GATE</div><h2>Top candidate clusters</h2></div><span class="count-badge">@state.Clusters.Count total</span></div>
+        <div class="table-responsive"><table class="app-table"><thead><tr><th>Cluster</th><th>Tickets</th><th>Value</th><th>Status</th></tr></thead><tbody>
+        @foreach (var cluster in topClusters)
+        {
+            <tr><td><strong>@cluster.Name</strong><small>@cluster.Workspace · @cluster.Risk risk</small></td><td>@cluster.TicketIds.Count</td><td><span class="score">@cluster.KnowledgeValue.ToString("0")</span></td><td><span class="status-pill @(cluster.Promoted ? "status-review" : "status-wait")">@(cluster.Promoted ? "In review" : "Candidate pool")</span></td></tr>
+        }
+        @if (topClusters.Count == 0) { <tr><td colspan="4" class="table-empty">No clusters yet</td></tr> }
+        </tbody></table></div>
+    </div>
+</section>
+
+<section class="section-block panel" id="knowledge">
+    <div class="panel-head"><div><div class="eyebrow">TRUSTED KNOWLEDGE</div><h2>Solution repository</h2></div><span class="count-badge">@state.Solutions.Count solution(s)</span></div>
+    <div class="solution-grid">
+    @foreach (var solution in state.Solutions.OrderByDescending(x => x.PublishedAt ?? x.CreatedAt).Take(8))
+    {
+        <article class="solution-card"><div class="solution-meta"><span class="status-pill @(solution.Status == SolutionStatus.Published ? "status-ok" : "status-review")">@solution.Status</span><span>v@solution.Version</span></div><h3>@solution.Title</h3><p>@solution.Procedure</p><footer><span>@solution.SourceTicketCount evidence tickets</span><span>@solution.UsageCount reuse</span></footer></article>
+    }
+    @if (state.Solutions.Count == 0) { <div class="empty-state wide"><strong>No solutions yet</strong><span>Only promoted clusters create solution drafts.</span></div> }
+    </div>
+</section>
+
+<section class="section-block panel">
+    <div class="panel-head"><div><div class="eyebrow">TRACEABILITY</div><h2>Recent ticket decisions</h2></div></div>
+    <div class="table-responsive"><table class="app-table ticket-table"><thead><tr><th>Source ticket</th><th>Workspace</th><th>Quality</th><th>Risk</th><th>Pipeline decision</th></tr></thead><tbody>
+    @foreach (var ticket in recentTickets)
+    {
+        <tr><td>@if (ticket.SourceUrl.StartsWith("http", StringComparison.OrdinalIgnoreCase)) { <a href="@ticket.SourceUrl" target="_blank" rel="noreferrer">@ticket.ExternalId</a> } else { <strong>@ticket.ExternalId</strong> }<small>@ticket.Source · @ticket.CleanTitle</small></td><td>@ticket.Workspace</td><td><span class="score">@ticket.QualityScore</span></td><td><span class="risk risk-@ticket.Risk.ToString().ToLowerInvariant()">@ticket.Risk</span></td><td><strong>@ticket.Decision</strong><small>@ticket.DecisionReason</small></td></tr>
+    }
+    @if (recentTickets.Count == 0) { <tr><td colspan="5" class="table-empty">No tickets imported</td></tr> }
+    </tbody></table></div>
+</section>
