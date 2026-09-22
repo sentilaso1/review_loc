@@ -13,6 +13,7 @@ public sealed class SourceTicket
     public required string ExternalId { get; init; }
     public required string SourceUrl { get; init; }
     public required string Title { get; init; }
+    public string Application { get; init; } = "";
     public string Description { get; init; } = "";
     public string Resolution { get; init; } = "";
     public string Status { get; init; } = "Resolved";
@@ -33,6 +34,7 @@ public sealed class TicketRecord
     public required string ExternalId { get; init; }
     public required string SourceUrl { get; init; }
     public required string Title { get; init; }
+    public string Application { get; init; } = "";
     public string RawJson { get; init; } = "";
     public required string CleanTitle { get; set; }
     public required string CleanDescription { get; set; }
@@ -52,6 +54,7 @@ public sealed class TicketRecord
     public Guid? ClusterId { get; set; }
     public Guid? LinkedSolutionId { get; set; }
     public double MatchConfidence { get; set; }
+    public double SimilarityScore { get; set; }
     public DateTimeOffset CreatedAt { get; init; }
     public DateTimeOffset ResolvedAt { get; init; }
     public DateTimeOffset ImportedAt { get; init; } = DateTimeOffset.UtcNow;
@@ -62,12 +65,14 @@ public sealed class TicketCluster
     public Guid Id { get; init; } = Guid.NewGuid();
     public required string Workspace { get; init; }
     public required string Category { get; init; }
+    public required string Subcategory { get; init; }
     public required string Name { get; set; }
     public string RepresentativeText { get; set; } = "";
     public List<Guid> TicketIds { get; init; } = [];
     public double AverageQuality { get; set; }
     public double KnowledgeValue { get; set; }
     public RiskLevel Risk { get; set; }
+    public string RiskReason { get; set; } = "";
     public bool Promoted { get; set; }
     public string PromotionReason { get; set; } = "Waiting for more evidence";
     public Guid? SolutionId { get; set; }
@@ -87,6 +92,7 @@ public sealed class KnowledgeSolution
     public SolutionStatus Status { get; set; } = SolutionStatus.Draft;
     public int Version { get; set; } = 1;
     public int SourceTicketCount { get; set; }
+    public List<Guid> SourceTicketIds { get; init; } = [];
     public int UsageCount { get; set; }
     public DateTimeOffset CreatedAt { get; init; } = DateTimeOffset.UtcNow;
     public DateTimeOffset? PublishedAt { get; set; }
@@ -109,6 +115,7 @@ public sealed class PipelineRun
     public Guid Id { get; init; } = Guid.NewGuid();
     public ImportMode Mode { get; init; }
     public string Connector { get; init; } = "Mock Jira";
+    public string QueueName { get; init; } = "BACKFILL_QUEUE";
     public int Received { get; set; }
     public int Imported { get; set; }
     public int IdempotentSkipped { get; set; }
@@ -122,6 +129,16 @@ public sealed class PipelineRun
     public int ManagerReviewsCreated { get; set; }
     public DateTimeOffset StartedAt { get; init; } = DateTimeOffset.UtcNow;
     public DateTimeOffset CompletedAt { get; set; }
+}
+
+public sealed class SimilarityLink
+{
+    public Guid Id { get; init; } = Guid.NewGuid();
+    public required Guid SourceTicketId { get; init; }
+    public required Guid TargetTicketId { get; init; }
+    public required string Method { get; init; }
+    public double Score { get; init; }
+    public DateTimeOffset CreatedAt { get; init; } = DateTimeOffset.UtcNow;
 }
 
 public sealed class AuditEntry
@@ -138,6 +155,7 @@ public sealed class DemoState
     public List<TicketCluster> Clusters { get; init; } = [];
     public List<KnowledgeSolution> Solutions { get; init; } = [];
     public List<ReviewTask> Reviews { get; init; } = [];
+    public List<SimilarityLink> SimilarityLinks { get; init; } = [];
     public List<PipelineRun> Runs { get; init; } = [];
     public List<AuditEntry> Audit { get; init; } = [];
     public int DailySyncNumber { get; set; }

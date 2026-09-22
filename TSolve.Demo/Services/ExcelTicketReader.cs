@@ -38,12 +38,11 @@ public sealed class ExcelTicketReader
             ?? throw new InvalidDataException("The first worksheet has no header row.");
         var headers = ReadRow(headerRow, sharedStrings)
             .ToDictionary(cell => cell.Key, cell => cell.Value.Trim().ToLowerInvariant());
-        var columns = RequiredHeaders.ToDictionary(
-            name => name,
-            name => headers.FirstOrDefault(header => header.Value == name).Key);
+        var columns = RequiredHeaders.ToDictionary(name => name, name => headers.FirstOrDefault(header => header.Value == name).Key);
         var missing = columns.Where(column => column.Value == 0).Select(column => column.Key).ToArray();
-        if (missing.Length > 0)
-            throw new InvalidDataException($"Missing required column(s): {string.Join(", ", missing)}.");
+        if (missing.Length > 0) throw new InvalidDataException($"Missing required column(s): {string.Join(", ", missing)}.");
+        var appColumn = headers.FirstOrDefault(header => header.Value == "app").Key;
+        var internalIdColumn = headers.FirstOrDefault(header => header.Value == "internal_ticket_id").Key;
 
         var fileId = Convert.ToHexString(SHA256.HashData(bytes))[..16];
         var safeName = Path.GetFileName(fileName);
@@ -59,15 +58,17 @@ public sealed class ExcelTicketReader
             if (string.IsNullOrWhiteSpace(summary) && string.IsNullOrWhiteSpace(description) && string.IsNullOrWhiteSpace(comment)) continue;
 
             var rowNumber = (int?)row.Attribute("r") ?? tickets.Count + 2;
-            if (string.IsNullOrWhiteSpace(summary))
-                throw new InvalidDataException($"Row {rowNumber} has no summary.");
+            if (string.IsNullOrWhiteSpace(summary)) throw new InvalidDataException($"Row {rowNumber} has no summary.");
+            var application = Get(cells, appColumn);
+            var internalId = Get(cells, internalIdColumn);
 
             tickets.Add(new SourceTicket
             {
                 Source = "Excel",
-                ExternalId = $"{fileId}:{rowNumber}",
+                ExternalId = string.IsNullOrWhiteSpace(internalId) ? $"{fileId}:{rowNumber}" : $"Excel:{internalId}",
                 SourceUrl = $"excel://{Uri.EscapeDataString(safeName)}#row={rowNumber}",
                 Title = summary,
+                Application = application,
                 Description = description,
                 Resolution = "",
                 Comments = string.IsNullOrWhiteSpace(comment) ? [] : [comment],
@@ -77,7 +78,7 @@ public sealed class ExcelTicketReader
                 CreatedAt = importedAt,
                 ResolvedAt = importedAt,
                 UpdatedAt = importedAt,
-                RawJson = JsonSerializer.Serialize(new { summary, description, comment })
+                RawJson = JsonSerializer.Serialize(new { internal_ticket_id = internalId, app = application, summary, description, comment })
             });
         }
 
@@ -116,26 +117,21 @@ public sealed class ExcelTicketReader
     private static string ReadCell(XElement cell, IReadOnlyList<string> sharedStrings)
     {
         var type = (string?)cell.Attribute("t");
-        if (type == "inlineStr")
-            return string.Concat(cell.Descendants(Spreadsheet + "t").Select(text => text.Value));
-
+        if (type == "inlineStr") return string.Concat(cell.Descendants(Spreadsheet + "t").Select(text => text.Value));
         var value = cell.Element(Spreadsheet + "v")?.Value ?? "";
-        return type == "s" && int.TryParse(value, out var index) && index >= 0 && index < sharedStrings.Count
-            ? sharedStrings[index]
-            : value;
+        return type == "s" && int.TryParse(value, out var index) && index >= 0 && index < sharedStrings.Count ? sharedStrings[index] : value;
     }
 
     private static int ColumnNumber(string? reference)
     {
         if (string.IsNullOrWhiteSpace(reference)) return 0;
         var column = 0;
-        foreach (var character in reference.TakeWhile(char.IsLetter))
-            column = column * 26 + char.ToUpperInvariant(character) - 'A' + 1;
+        foreach (var character in reference.TakeWhile(char.IsLetter)) column = column * 26 + char.ToUpperInvariant(character) - 'A' + 1;
         return column;
     }
 
     private static string Get(IReadOnlyDictionary<int, string> cells, int column) =>
-        cells.TryGetValue(column, out var value) ? value.Trim() : "";
+        column > 0 && cells.TryGetValue(column, out var value) ? value.Trim() : "";
 
     private static ZipArchiveEntry RequiredEntry(ZipArchive archive, string path) =>
         archive.GetEntry(path) ?? throw new InvalidDataException($"Invalid Excel file: {path} is missing.");

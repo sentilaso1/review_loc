@@ -1,7 +1,7 @@
+using Microsoft.Extensions.Options;
 using TSolve.Demo.Models;
 using TSolve.Demo.Options;
 using TSolve.Demo.Services.Jira;
-using Microsoft.Extensions.Options;
 
 namespace TSolve.Demo.Services;
 
@@ -9,18 +9,19 @@ public sealed class KnowledgePipelineService(
     DemoStore store,
     TextProcessingService text,
     JiraClientSelector jiraSelector,
-    IOptions<JiraOptions> options,
-    ILogger<KnowledgePipelineService> logger)
+    IOptions<JiraOptions> jiraOptions,
+    ILogger<KnowledgePipelineService> logger,
+    IOptions<PipelineOptions>? configuredPipelineOptions = null)
 {
-    private readonly JiraOptions _options = options.Value;
+    private readonly JiraOptions _jiraOptions = jiraOptions.Value;
+    private readonly PipelineOptions _pipelineOptions = configuredPipelineOptions?.Value ?? new PipelineOptions();
 
     public async Task<PipelineRun> ImportAsync(ImportMode mode, CancellationToken cancellationToken)
     {
-        var dailySyncNumber = await store.ReadAsync(x => x.DailySyncNumber);
-        var limit = mode == ImportMode.Bulk ? _options.BulkLimit : _options.DailyLimit;
+        var dailySyncNumber = await store.ReadAsync(state => state.DailySyncNumber);
+        var limit = mode == ImportMode.Bulk ? _jiraOptions.BulkLimit : _jiraOptions.DailyLimit;
         var connector = jiraSelector.Current;
         var sourceTickets = await connector.GetResolvedTicketsAsync(mode, limit, dailySyncNumber, cancellationToken);
-
         return await ImportAsync(sourceTickets, mode, connector.Name, cancellationToken);
     }
 
@@ -34,17 +35,19 @@ public sealed class KnowledgePipelineService(
         CancellationToken cancellationToken)
     {
         cancellationToken.ThrowIfCancellationRequested();
-
         var run = await store.WriteAsync(state =>
         {
-            var currentRun = new PipelineRun { Mode = mode, Connector = connector, Received = sourceTickets.Count };
-            foreach (var source in sourceTickets)
-                ProcessTicket(state, source, currentRun);
+            var currentRun = new PipelineRun
+            {
+                Mode = mode,
+                Connector = connector,
+                QueueName = mode == ImportMode.Bulk ? "BACKFILL_QUEUE" : "DAILY_QUEUE",
+                Received = sourceTickets.Count
+            };
+            foreach (var source in sourceTickets) ProcessTicket(state, source, currentRun);
 
-            if (mode == ImportMode.Bulk)
-                PromoteBestBulkClusters(state, currentRun);
-            else
-                PromoteReadyDailyClusters(state, currentRun);
+            if (mode == ImportMode.Bulk) PromoteBestBulkClusters(state, currentRun);
+            else PromoteReadyDailyClusters(state, currentRun);
 
             currentRun.CompletedAt = DateTimeOffset.UtcNow;
             state.Runs.Insert(0, currentRun);
@@ -55,12 +58,12 @@ public sealed class KnowledgePipelineService(
                     ? "EXCEL_IMPORT_COMPLETED"
                     : mode == ImportMode.Bulk ? "BULK_IMPORT_COMPLETED" : "DAILY_SYNC_COMPLETED",
                 Resource = currentRun.Id.ToString(),
-                Detail = $"Received {currentRun.Received}, imported {currentRun.Imported}, created {currentRun.DraftsCreated} drafts"
+                Detail = $"Queue {currentRun.QueueName}; received {currentRun.Received}, imported {currentRun.Imported}, created {currentRun.DraftsCreated} drafts"
             });
             return currentRun;
         });
 
-        logger.LogInformation("{Mode} import completed: {Imported}/{Received}, {Drafts} drafts", mode, run.Imported, run.Received, run.DraftsCreated);
+        logger.LogInformation("{Queue} import completed: {Imported}/{Received}, {Drafts} drafts", run.QueueName, run.Imported, run.Received, run.DraftsCreated);
         return run;
     }
 
@@ -68,9 +71,9 @@ public sealed class KnowledgePipelineService(
     {
         return store.WriteAsync(state =>
         {
-            var review = state.Reviews.FirstOrDefault(x => x.Id == reviewId && x.Decision == ReviewDecision.Pending);
+            var review = state.Reviews.FirstOrDefault(item => item.Id == reviewId && item.Decision == ReviewDecision.Pending);
             if (review is null) return false;
-            var solution = state.Solutions.First(x => x.Id == review.SolutionId);
+            var solution = state.Solutions.First(item => item.Id == review.SolutionId);
             review.Decision = decision;
             review.DecisionReason = reason;
             review.DecidedAt = DateTimeOffset.UtcNow;
@@ -88,7 +91,7 @@ public sealed class KnowledgePipelineService(
 
     private void ProcessTicket(DemoState state, SourceTicket source, PipelineRun run)
     {
-        if (state.Tickets.Any(x => x.Source == source.Source && x.ExternalId == source.ExternalId))
+        if (state.Tickets.Any(ticket => ticket.Source == source.Source && ticket.ExternalId == source.ExternalId))
         {
             run.IdempotentSkipped++;
             return;
@@ -101,6 +104,7 @@ public sealed class KnowledgePipelineService(
             ExternalId = source.ExternalId,
             SourceUrl = source.SourceUrl,
             Title = source.Title,
+            Application = source.Application,
             RawJson = source.RawJson,
             CleanTitle = clean.Title,
             CleanDescription = clean.Description,
@@ -125,26 +129,28 @@ public sealed class KnowledgePipelineService(
         if (ticket.Decision == ProcessingDecision.Blocked) { run.Blocked++; return; }
         if (ticket.Decision == ProcessingDecision.SearchOnly) { run.SearchOnly++; return; }
 
-        var duplicate = state.Tickets.FirstOrDefault(x => x.Id != ticket.Id && x.ContentHash == ticket.ContentHash && x.Workspace == ticket.Workspace);
-        if (duplicate is not null)
+        var exactDuplicate = state.Tickets.FirstOrDefault(other =>
+            other.Id != ticket.Id && other.ContentHash == ticket.ContentHash && other.Workspace == ticket.Workspace);
+        if (exactDuplicate is not null)
         {
-            ticket.Decision = ProcessingDecision.Duplicate;
-            ticket.DecisionReason = $"Exact normalized duplicate of {duplicate.ExternalId}";
-            ticket.DuplicateOfTicketId = duplicate.Id;
-            ticket.ClusterId = duplicate.ClusterId;
-            run.Duplicates++;
+            MarkDuplicate(state, ticket, exactDuplicate, 1, "Exact normalized duplicate", run);
+            return;
+        }
+
+        var nearDuplicate = FindNearDuplicate(state, ticket);
+        if (nearDuplicate.Ticket is not null)
+        {
+            MarkDuplicate(state, ticket, nearDuplicate.Ticket, nearDuplicate.Score, "Near duplicate from local text embeddings", run);
             return;
         }
 
         var publishedMatch = FindPublishedMatch(state, ticket);
-        // Jaccard is intentionally conservative because scope/workspace/risk guards are checked separately.
-        // On the deterministic evaluation set, 0.30 separates same-resolution cases from unrelated cases.
-        if (publishedMatch.Solution is not null && publishedMatch.Score >= 0.30 && ticket.Risk != RiskLevel.High)
+        if (publishedMatch.Solution is not null && publishedMatch.Score >= _pipelineOptions.PublishedMatchThreshold && ticket.Risk != RiskLevel.High)
         {
             ticket.Decision = ProcessingDecision.AutoLinked;
             ticket.LinkedSolutionId = publishedMatch.Solution.Id;
             ticket.MatchConfidence = publishedMatch.Score;
-            ticket.DecisionReason = $"Matched published solution at {publishedMatch.Score:P0}";
+            ticket.DecisionReason = $"Matched published solution at {publishedMatch.Score:P0}; threshold {_pipelineOptions.PublishedMatchThreshold:P0}";
             publishedMatch.Solution.UsageCount++;
             run.AutoLinked++;
             return;
@@ -155,23 +161,74 @@ public sealed class KnowledgePipelineService(
         AddToCluster(state, ticket);
     }
 
+    private void MarkDuplicate(DemoState state, TicketRecord ticket, TicketRecord duplicate, double score, string method, PipelineRun run)
+    {
+        ticket.Decision = ProcessingDecision.Duplicate;
+        ticket.DecisionReason = $"{method} of {duplicate.ExternalId} at {score:P0}";
+        ticket.DuplicateOfTicketId = duplicate.Id;
+        ticket.ClusterId = duplicate.ClusterId;
+        ticket.SimilarityScore = score;
+        if (method.StartsWith("Near duplicate", StringComparison.Ordinal) && duplicate.ClusterId is Guid clusterId)
+        {
+            var cluster = state.Clusters.First(item => item.Id == clusterId);
+            if (!cluster.TicketIds.Contains(ticket.Id)) cluster.TicketIds.Add(ticket.Id);
+            RecalculateCluster(state, cluster);
+        }
+        state.SimilarityLinks.Add(new SimilarityLink
+        {
+            SourceTicketId = ticket.Id,
+            TargetTicketId = duplicate.Id,
+            Method = method,
+            Score = score
+        });
+        run.Duplicates++;
+    }
+
+    private (TicketRecord? Ticket, double Score) FindNearDuplicate(DemoState state, TicketRecord ticket)
+    {
+        var ticketText = TicketText(ticket);
+        return state.Tickets
+            .Where(other => other.Id != ticket.Id && other.Workspace == ticket.Workspace && other.Category == ticket.Category && other.Subcategory == ticket.Subcategory)
+            .Select(other =>
+            {
+                var titleScore = text.TitleSimilarity(ticket.CleanTitle, other.CleanTitle);
+                var resolutionScore = text.Similarity(ticket.CleanResolution, other.CleanResolution);
+                var contentScore = text.Similarity(ticketText, TicketText(other));
+                var score = resolutionScore * 0.60 + titleScore * 0.25 + contentScore * 0.15;
+                return (Ticket: other, Score: score, TitleScore: titleScore, ResolutionScore: resolutionScore);
+            })
+            .Where(match => match.Score >= _pipelineOptions.NearDuplicateThreshold &&
+                            (match.TitleScore >= _pipelineOptions.NearDuplicateTitleThreshold ||
+                             match.ResolutionScore >= _pipelineOptions.NearDuplicateThreshold))
+            .OrderByDescending(match => match.Score)
+            .Select(match => (match.Ticket, match.Score))
+            .FirstOrDefault();
+    }
+
     private (KnowledgeSolution? Solution, double Score) FindPublishedMatch(DemoState state, TicketRecord ticket)
     {
         return state.Solutions
-            .Where(x => x.Status == SolutionStatus.Published && x.Workspace == ticket.Workspace && x.ReviewDueAt > DateTimeOffset.UtcNow)
-            .Select(x => (Solution: x, Score: text.Similarity($"{ticket.CleanTitle} {ticket.CleanResolution}", $"{x.Title} {x.Problem} {x.Procedure}")))
-            .OrderByDescending(x => x.Score)
+            .Where(solution => solution.Status == SolutionStatus.Published && solution.Workspace == ticket.Workspace && solution.ReviewDueAt > DateTimeOffset.UtcNow)
+            .Select(solution => (Solution: solution, Score: text.Similarity(TicketText(ticket), $"{solution.Title} {solution.Problem} {solution.Procedure}")))
+            .OrderByDescending(match => match.Score)
             .FirstOrDefault();
     }
 
     private void AddToCluster(DemoState state, TicketRecord ticket)
     {
-        var ticketText = $"{ticket.CleanTitle} {ticket.CleanDescription} {ticket.CleanResolution}";
+        var ticketText = TicketText(ticket);
         var candidate = state.Clusters
-            .Where(x => x.Workspace == ticket.Workspace && x.Category == ticket.Category)
-            .Select(x => (Cluster: x, Score: text.Similarity(ticketText, x.RepresentativeText)))
-            .Where(x => x.Score >= 0.34)
-            .OrderByDescending(x => x.Score)
+            .Where(cluster => cluster.Workspace == ticket.Workspace && cluster.Category == ticket.Category && cluster.Subcategory == ticket.Subcategory && !cluster.Promoted)
+            .Select(cluster =>
+            {
+                var scores = state.Tickets
+                    .Where(member => cluster.TicketIds.Contains(member.Id))
+                    .Select(member => ClusterSimilarity(ticket, member))
+                    .ToArray();
+                return (Cluster: cluster, Score: scores.Length == 0 ? 0 : scores.Min());
+            })
+            .Where(match => match.Score >= _pipelineOptions.ClusterSimilarityThreshold)
+            .OrderByDescending(match => match.Score)
             .FirstOrDefault();
 
         var cluster = candidate.Cluster;
@@ -181,6 +238,7 @@ public sealed class KnowledgePipelineService(
             {
                 Workspace = ticket.Workspace,
                 Category = ticket.Category,
+                Subcategory = ticket.Subcategory,
                 Name = text.BuildClusterName(ticket),
                 RepresentativeText = ticketText,
                 Risk = ticket.Risk
@@ -195,53 +253,62 @@ public sealed class KnowledgePipelineService(
 
     private static void RecalculateCluster(DemoState state, TicketCluster cluster)
     {
-        var members = state.Tickets.Where(x => cluster.TicketIds.Contains(x.Id)).ToList();
-        cluster.AverageQuality = members.Count == 0 ? 0 : members.Average(x => x.QualityScore);
-        cluster.Risk = members.Any(x => x.Risk == RiskLevel.High) ? RiskLevel.High : members.Any(x => x.Risk == RiskLevel.Medium) ? RiskLevel.Medium : RiskLevel.Low;
+        var members = state.Tickets.Where(ticket => cluster.TicketIds.Contains(ticket.Id)).ToList();
+        cluster.AverageQuality = members.Count == 0 ? 0 : members.Average(ticket => ticket.QualityScore);
+        cluster.Risk = members.Count == 0 ? RiskLevel.Low : members.Max(ticket => ticket.Risk);
+        var maxRiskCount = members.Count(ticket => ticket.Risk == cluster.Risk);
+        cluster.RiskReason = $"MAX strategy: {cluster.Risk} is the highest member risk ({maxRiskCount}/{members.Count} ticket(s)).";
         var frequency = Math.Min(100, members.Count * 8);
-        var recency = members.Count == 0 ? 0 : Math.Max(0, 100 - (DateTimeOffset.UtcNow - members.Max(x => x.ResolvedAt)).TotalDays);
+        var recency = members.Count == 0 ? 0 : Math.Max(0, 100 - (DateTimeOffset.UtcNow - members.Max(ticket => ticket.ResolvedAt)).TotalDays);
         cluster.KnowledgeValue = Math.Round(frequency * .45 + cluster.AverageQuality * .4 + recency * .15, 1);
     }
 
     private void PromoteBestBulkClusters(DemoState state, PipelineRun run)
     {
         var eligible = state.Clusters
-            .Where(x => !x.Promoted && x.AverageQuality >= 55 &&
-                        (x.TicketIds.Count >= 3 || (x.Risk == RiskLevel.High && x.TicketIds.Count >= 2)))
-            .OrderByDescending(x => x.KnowledgeValue)
-            .Take(24)
+            .Where(cluster => !cluster.Promoted && cluster.AverageQuality >= _pipelineOptions.PromotionMinAverageQuality &&
+                (cluster.TicketIds.Count >= _pipelineOptions.PromotionMinEvidence ||
+                 cluster.Risk == RiskLevel.High && cluster.TicketIds.Count >= _pipelineOptions.HighRiskPromotionMinEvidence))
+            .OrderByDescending(cluster => cluster.KnowledgeValue)
+            .Take(_pipelineOptions.BulkPromotionLimit)
             .ToList();
-        foreach (var cluster in eligible) Promote(state, cluster, run, "Top-ranked cluster from historical import");
+        foreach (var cluster in eligible) Promote(state, cluster, run, "Top-ranked content-similar cluster from historical import");
     }
 
     private void PromoteReadyDailyClusters(DemoState state, PipelineRun run)
     {
         var eligible = state.Clusters
-            .Where(x => !x.Promoted && x.SolutionId is null && x.TicketIds.Count >= 3 && x.AverageQuality >= 55)
-            .OrderByDescending(x => x.Risk)
-            .ThenByDescending(x => x.KnowledgeValue)
-            .Take(3)
+            .Where(cluster => !cluster.Promoted && cluster.SolutionId is null &&
+                              cluster.TicketIds.Count >= _pipelineOptions.PromotionMinEvidence &&
+                              cluster.AverageQuality >= _pipelineOptions.PromotionMinAverageQuality)
+            .OrderByDescending(cluster => cluster.Risk)
+            .ThenByDescending(cluster => cluster.KnowledgeValue)
+            .Take(_pipelineOptions.DailyPromotionLimit)
             .ToList();
-        foreach (var cluster in eligible) Promote(state, cluster, run, "Daily cluster reached evidence threshold");
+        foreach (var cluster in eligible) Promote(state, cluster, run, "Daily content-similar cluster reached evidence threshold");
     }
 
     private void Promote(DemoState state, TicketCluster cluster, PipelineRun run, string reason)
     {
-        var tickets = state.Tickets.Where(x => cluster.TicketIds.Contains(x.Id)).OrderByDescending(x => x.QualityScore).ToList();
+        var tickets = state.Tickets.Where(ticket => cluster.TicketIds.Contains(ticket.Id)).OrderByDescending(ticket => ticket.QualityScore).ToList();
         if (tickets.Count == 0 || cluster.SolutionId is not null) return;
-        var best = tickets[0];
+
+        var synthesis = text.Synthesize(tickets);
         var solution = new KnowledgeSolution
         {
             ClusterId = cluster.Id,
             Workspace = cluster.Workspace,
             Title = cluster.Name,
-            Problem = best.CleanDescription.Length > 0 ? best.CleanDescription : best.CleanTitle,
-            Procedure = best.CleanResolution,
+            Problem = synthesis.Problem,
+            Procedure = synthesis.Procedure,
             Applicability = $"Workspace {cluster.Workspace}; category {cluster.Category}; supported by {tickets.Count} source ticket(s).",
-            Warning = cluster.Risk == RiskLevel.High ? "High-risk knowledge: verify policy, authorization and current environment before reuse." : "Verify applicability before reuse.",
+            Warning = cluster.Risk == RiskLevel.High
+                ? $"High-risk knowledge: verify policy, authorization and current environment before reuse. {synthesis.Warning}"
+                : synthesis.Warning,
             Risk = cluster.Risk,
             Status = SolutionStatus.InReview,
             SourceTicketCount = tickets.Count,
+            SourceTicketIds = tickets.Select(ticket => ticket.Id).ToList(),
             ReviewDueAt = DateTimeOffset.UtcNow.AddMonths(cluster.Risk == RiskLevel.High ? 3 : 6)
         };
         cluster.Promoted = true;
@@ -253,4 +320,10 @@ public sealed class KnowledgePipelineService(
         run.DraftsCreated++;
         if (role == ReviewRole.ManagerSme) run.ManagerReviewsCreated++; else run.DomainReviewsCreated++;
     }
+
+    private double ClusterSimilarity(TicketRecord left, TicketRecord right) =>
+        text.TitleSimilarity(left.CleanTitle, right.CleanTitle) * 0.70 +
+        text.Similarity(left.CleanResolution, right.CleanResolution) * 0.30;
+
+    private static string TicketText(TicketRecord ticket) => $"{ticket.CleanTitle} {ticket.CleanDescription} {ticket.CleanResolution}";
 }

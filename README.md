@@ -74,3 +74,17 @@ Never commit Jira API tokens. For a production integration, prefer OAuth 2.0 and
 - Similarity uses deterministic token-set similarity so the demo works offline. The service boundary can later be replaced by pgvector or an embedding model.
 - Thresholds are evaluation-set defaults, not universal production values. Audit a sample of auto-link/search-only decisions before changing them.
 - T-Solve does not modify Jira ticket lifecycle, assignment, SLA or status.
+
+
+
+## Pipeline scoring and thresholds
+
+Pipeline thresholds are configured under `Pipeline` in `appsettings.json`.
+
+- Quality score (0-100): title length 10; description length 15; resolution length 25 plus 10 for a detailed resolution; numbered/action steps 15; root-cause wording 10; comments 5; labels 5; and a non-generic resolution 5. Tickets below `CandidateQualityThreshold` or with fewer than `WeakResolutionMinTokens` meaningful resolution tokens remain searchable but do not become knowledge candidates.
+- Risk: configured high-risk keywords take precedence over medium-risk keywords. Cluster risk uses the maximum member risk and records `RiskReason`, so a cluster can never be lower risk than one of its tickets.
+- Near duplicates: a configurable weighted score combines resolution embedding similarity (60%), title similarity (25%), and full-content similarity (15%). Each detected pair creates a `SimilarityLink` before clustering.
+- Clustering: tickets must share workspace and category, and every member-to-new-ticket similarity must meet `ClusterSimilarityThreshold`. The local multilingual sparse embedding uses word, word-bigram, and character-trigram features so CI and offline demos do not depend on an external model. Replace it with a hosted sentence-transformer/vector index when production-scale semantic recall or ANN performance is required.
+- Published matching: only non-expired `PUBLISHED` solutions in the same workspace qualify, using `PublishedMatchThreshold`. AI/synthesis output remains `IN_REVIEW`; the pipeline never auto-publishes.
+
+Bulk imports use `BACKFILL_QUEUE`; incremental imports use `DAILY_QUEUE`. The demo stores both queue names for audit while retaining its in-memory execution model.

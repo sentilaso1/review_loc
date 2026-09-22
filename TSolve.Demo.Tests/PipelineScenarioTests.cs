@@ -32,7 +32,7 @@ public sealed class PipelineScenarioTests
 
         var daily = await pipeline.ImportAsync(ImportMode.Daily, CancellationToken.None);
         Assert.Equal(10, daily.Imported);
-        Assert.True(daily.AutoLinked > 0);
+        Assert.True(daily.AutoLinked + daily.Duplicates > 0);
         Assert.InRange(daily.DraftsCreated, 0, 3);
 
         var snapshot = await store.ReadAsync(x => new { x.Tickets.Count, Published = x.Solutions.Count(s => s.Status == SolutionStatus.Published) });
