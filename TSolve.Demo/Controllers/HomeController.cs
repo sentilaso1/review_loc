@@ -9,7 +9,7 @@ namespace TSolve.Demo.Controllers;
 
 public class HomeController(
     ILogger<HomeController> logger,
-    DemoStore store,
+    IStateStore store,
     KnowledgePipelineService pipeline,
     ExcelTicketReader excel,
     IOptions<JiraOptions> jiraOptions) : Controller

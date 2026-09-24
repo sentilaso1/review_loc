@@ -20,12 +20,17 @@ The full design rationale is in [T-Solve-MVP-Solution.md](T-Solve-MVP-Solution.m
 
 ## Run locally
 
-Requirements: .NET 10 SDK.
+Requirements: .NET 9 SDK, PostgreSQL 17 client/server, and the `pgvector` extension.
+
+PostgreSQL is the authoritative runtime store. Copy `.env.example` to your local environment setup and set `DATABASE_URL`; the application fails fast when the database is missing or unreachable and never silently falls back to memory.
 
 ```powershell
+$env:DATABASE_URL = 'postgresql://postgres:your-password@localhost:5432/tsolve_dev'
 dotnet restore TSolve.sln
 dotnet run --project TSolve.Demo
 ```
+
+On first startup the application creates `tsolve_dev` when necessary and applies the versioned SQL migration in `TSolve.Demo/Database/Migrations`. It uses the installed `psql` client (override with `PSQL_PATH`) so the data layer can run in restricted/offline environments without downloading a database driver. Writes are serialized, wrapped in a PostgreSQL transaction, and protected by an advisory lock. The schema includes the core T-Solve entities, database-level `(source, external_ticket_id)` uniqueness, filter indexes, `vector(384)`, and an HNSW cosine index.
 
 Open the URL printed by ASP.NET Core. The application starts in deterministic `Mock Jira` mode.
 
@@ -38,7 +43,7 @@ Recommended demo sequence:
 5. Show that safe tickets link to published knowledge while new/high-risk knowledge remains controlled.
 6. Inspect `GET /api/demo/summary` to show the same metrics as JSON.
 
-Use **Reset demo** to return to a clean in-memory state.
+Use **Reset demo** to clear the persistent T-Solve tables transactionally.
 
 ## Import from Excel
 
@@ -49,6 +54,14 @@ Use the dashboard upload form with an `.xlsx` file. The first worksheet must con
 | Ticket title | Problem details | Resolution or evidence used to solve it |
 
 Blank rows are ignored and `summary` is required on every ticket row. Re-importing the same file is idempotent. Excel tickets pass through the same masking, quality, duplicate, clustering, promotion, and human-review pipeline as Jira tickets.
+
+The reader also recognizes the existing four-sheet test-result workbook (`Ticket Results`, with `original comment`) so the 500-row baseline can be rerun directly. Generate the comparable four-sheet report with:
+
+```powershell
+dotnet run --project TSolve.Demo -- --backfill-report input.xlsx output.xlsx
+```
+
+Append `reverse` or `shuffle` to audit order independence. Bulk input is canonically sorted and clustered globally with complete-link, so all three orders produce the same member partitions.
 
 ## Connect to Jira Cloud
 
@@ -70,8 +83,8 @@ Never commit Jira API tokens. For a production integration, prefer OAuth 2.0 and
 
 ## Important demo boundaries
 
-- State is intentionally in memory so every presentation can be reset. Replace `DemoStore` with PostgreSQL/EF Core for production persistence.
-- Similarity uses deterministic token-set similarity so the demo works offline. The service boundary can later be replaced by pgvector or an embedding model.
+- `DemoStore` remains only as a fast unit-test fixture. The web application uses `PostgresStateStore` exclusively.
+- Local semantic features canonicalize Vietnamese/English domain concepts and remove support boilerplate. The schema already stores nullable pgvector embeddings so a self-hosted multilingual sentence-transformer can replace the deterministic offline encoder without another table redesign.
 - Thresholds are evaluation-set defaults, not universal production values. Audit a sample of auto-link/search-only decisions before changing them.
 - T-Solve does not modify Jira ticket lifecycle, assignment, SLA or status.
 
@@ -83,8 +96,14 @@ Pipeline thresholds are configured under `Pipeline` in `appsettings.json`.
 
 - Quality score (0-100): title length 10; description length 15; resolution length 25 plus 10 for a detailed resolution; numbered/action steps 15; root-cause wording 10; comments 5; labels 5; and a non-generic resolution 5. Tickets below `CandidateQualityThreshold` or with fewer than `WeakResolutionMinTokens` meaningful resolution tokens remain searchable but do not become knowledge candidates.
 - Risk: configured high-risk keywords take precedence over medium-risk keywords. Cluster risk uses the maximum member risk and records `RiskReason`, so a cluster can never be lower risk than one of its tickets.
-- Near duplicates: a configurable weighted score combines resolution embedding similarity (60%), title similarity (25%), and full-content similarity (15%). Each detected pair creates a `SimilarityLink` before clustering.
-- Clustering: tickets must share workspace and category, and every member-to-new-ticket similarity must meet `ClusterSimilarityThreshold`. The local multilingual sparse embedding uses word, word-bigram, and character-trigram features so CI and offline demos do not depend on an external model. Replace it with a hosted sentence-transformer/vector index when production-scale semantic recall or ANN performance is required.
+- Near duplicates: a configurable weighted score combines resolution semantic similarity (60%), title similarity (25%), and full-content similarity (15%). Each detected pair creates a `SimilarityLink` before clustering.
+- Clustering: tickets must share workspace/category/subcategory. Backfill performs deterministic global complete-link merging: the least-similar cross-pair must meet `ClusterSimilarityThreshold`, so single-link chaining cannot occur. Daily tickets are checked against every existing cluster member.
 - Published matching: only non-expired `PUBLISHED` solutions in the same workspace qualify, using `PublishedMatchThreshold`. AI/synthesis output remains `IN_REVIEW`; the pipeline never auto-publishes.
+
+## Two-stage synthesis and data egress
+
+Stage A selects the resolution nearest the cluster consensus, isolates resolution outliers as exceptions, shortens the evidence, and runs the same PII masker again. Stage B receives only that masked extract and rewrites it into `problem`, `procedure`, `applicability`, and `warning`. Conflicting evidence returns `insufficient evidence` and does not create a draft. Every Stage-B attempt records an `AIRun` with model/provider, prompt hash, referenced cluster/tickets, latency, cost, masking assertion, and outcome.
+
+The default Stage-B provider is `Internal`, so no data leaves company infrastructure. If an external provider adapter is introduced, that adapter is the explicit data-egress boundary; `AllowExternalForSensitiveContent` defaults to `false`, and High-risk/HR/Finance clusters must remain on an internal model. External output may only create an `IN_REVIEW` draft.
 
 Bulk imports use `BACKFILL_QUEUE`; incremental imports use `DAILY_QUEUE`. The demo stores both queue names for audit while retaining its in-memory execution model.

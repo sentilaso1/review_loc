@@ -53,7 +53,7 @@ public sealed class PipelineRegressionTests
         ], "near-duplicates.xlsx", CancellationToken.None);
 
         var state = await store.ReadAsync(value => value);
-        var duplicate = state.Tickets.Single(ticket => ticket.ExternalId == "15434");
+        var duplicate = Assert.Single(state.Tickets.Where(ticket => ticket.Decision == ProcessingDecision.Duplicate));
         Assert.Equal(ProcessingDecision.Duplicate, duplicate.Decision);
         Assert.NotNull(duplicate.DuplicateOfTicketId);
         Assert.Contains(state.SimilarityLinks, link => link.SourceTicketId == duplicate.Id && link.Method.Contains("Near duplicate"));
@@ -77,6 +77,55 @@ public sealed class PipelineRegressionTests
         Assert.DoesNotContain("example.com", solution.Problem + solution.Procedure, StringComparison.OrdinalIgnoreCase);
         Assert.DoesNotContain("Comment", solution.Procedure, StringComparison.OrdinalIgnoreCase);
         Assert.Contains("supported by", solution.Procedure, StringComparison.OrdinalIgnoreCase);
+        var aiRun = Assert.Single(state.AIRuns);
+        Assert.True(aiRun.InputWasMasked);
+        Assert.False(string.IsNullOrWhiteSpace(aiRun.PromptHash));
+        Assert.Equal(solution.ClusterId, aiRun.ClusterId);
+    }
+
+    [Fact]
+    public async Task BadgeTicket15178_IsNeverClusteredWithAttendanceDashboardOrPipelineTickets()
+    {
+        var (pipeline, store) = Pipeline(new PipelineOptions { NearDuplicateThreshold = 0.99, ClusterSimilarityThreshold = 0.20 });
+        await pipeline.ImportExcelAsync([
+            Ticket("15178", "", "Xin cấp dây thẻ", "1. Xác nhận thông tin nhân viên. 2. Cấp dây thẻ ra vào. 3. Bàn giao thẻ."),
+            Ticket("15369", "", "Không ghi nhận giờ chấm công", "1. Tải dữ liệu máy chấm công. 2. Đồng bộ Timesheet. 3. Chạy lại tính công."),
+            Ticket("15239", "", "HRMS không hiện ngày công", "1. Kiểm tra dữ liệu HRMS. 2. Đồng bộ Timesheet. 3. Xác minh ngày công."),
+            Ticket("15435", "", "Dashboard không cập nhật cảnh báo", "1. Làm mới dữ liệu Dashboard. 2. Chạy tác vụ đồng bộ. 3. Kiểm tra biểu đồ."),
+            Ticket("15451", "", "Lỗi khi log pipeline", "1. Kiểm tra pipeline CRM. 2. Chạy lại workflow. 3. Xác minh trạng thái.")
+        ], "cluster-051b7e78.xlsx", CancellationToken.None);
+
+        var state = await store.ReadAsync(value => value);
+        var badge = state.Tickets.Single(ticket => ticket.ExternalId == "15178");
+        Assert.Equal("ACCESS", badge.Category);
+        Assert.Equal("PHYSICAL_BADGE", badge.Subcategory);
+        Assert.DoesNotContain(state.Tickets.Where(ticket => ticket.ExternalId != "15178"), ticket => ticket.ClusterId == badge.ClusterId);
+    }
+
+    [Fact]
+    public async Task BulkClustering_IsIndependentOfInputOrder()
+    {
+        var source = Enumerable.Range(1, 24).Select(index => (index % 3) switch
+        {
+            0 => Ticket($"O-{index:00}", "Dashboard", "Task end date cannot update", $"1. Check task permission. 2. Update end date. 3. Verify dashboard. Reference {index}."),
+            1 => Ticket($"O-{index:00}", "HRMS/TMS System", "Timesheet attendance missing", $"1. Download attendance. 2. Sync timesheet. 3. Recalculate attendance. Reference {index}."),
+            _ => Ticket($"O-{index:00}", "CRM System", "Invoice payment missing", $"1. Check invoice. 2. Add payment. 3. Verify billing status. Reference {index}.")
+        }).ToArray();
+
+        var normal = await ClusterSignature(source);
+        var reverse = await ClusterSignature(source.Reverse().ToArray());
+        var shuffled = await ClusterSignature(source.OrderBy(ticket => HashCode.Combine(ticket.ExternalId, 42)).ToArray());
+        Assert.Equal(normal, reverse);
+        Assert.Equal(normal, shuffled);
+    }
+
+    private static async Task<string> ClusterSignature(IReadOnlyList<SourceTicket> tickets)
+    {
+        var (pipeline, store) = Pipeline(new PipelineOptions { NearDuplicateThreshold = 1.01, NearDuplicateTitleThreshold = 1.01, ClusterSimilarityThreshold = 0.35, PromotionMinEvidence = 100 });
+        await pipeline.ImportExcelAsync(tickets, "order.xlsx", CancellationToken.None);
+        return await store.ReadAsync(state => string.Join("|", state.Clusters
+            .Select(cluster => string.Join(",", state.Tickets.Where(ticket => cluster.TicketIds.Contains(ticket.Id)).Select(ticket => ticket.ExternalId).OrderBy(value => value)))
+            .OrderBy(value => value)));
     }
 
     [Fact]

@@ -55,20 +55,18 @@ public sealed partial class TextProcessingService(IOptions<PipelineOptions>? con
         return new CleanTicketResult(title, description, resolution, category, subcategory, risk, score, decision, reason);
     }
 
-    // Sparse multilingual text embedding: word, word-bigram and character-trigram features.
-    // ponytail: O(n²) comparisons are deliberate for the 500-ticket MVP; replace with ANN/vector DB at production scale.
+    // Deterministic multilingual semantic feature embedding. Domain synonyms are canonicalized before
+    // word/bigram/subword projection, while support boilerplate is excluded from the signal.
     public double Similarity(string left, string right)
     {
-        var leftTokens = Tokenize(left);
-        var rightTokens = Tokenize(right);
-        var union = leftTokens.Union(rightTokens).Count();
-        var jaccard = union == 0 ? 0 : (double)leftTokens.Intersect(rightTokens).Count() / union;
-        return Math.Max(jaccard, Cosine(BuildEmbedding(left), BuildEmbedding(right)));
+        return Cosine(BuildEmbedding(left), BuildEmbedding(right));
     }
 
     public double TitleSimilarity(string left, string right) => Cosine(BuildEmbedding(left, includeCharacterTrigrams: true), BuildEmbedding(right, includeCharacterTrigrams: true));
 
     public string Hash(string value) => Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(value)));
+
+    public string MaskSensitive(string? value) => NormalizeAndMask(value);
 
     public string BuildClusterName(TicketRecord ticket) => $"{ToDisplay(ticket.Category)} · {ToDisplay(ticket.Subcategory)}";
 
@@ -126,13 +124,16 @@ public sealed partial class TextProcessingService(IOptions<PipelineOptions>? con
     private string NormalizeAndMask(string? value)
     {
         var text = WebUtility.HtmlDecode(value ?? "");
+        text = MentionElementRegex().Replace(text, " [PERSON] ");
         text = HtmlRegex().Replace(text, " ");
         text = CommentLabelRegex().Replace(text, " ");
         text = JiraMarkupRegex().Replace(text, " ");
-        text = UrlRegex().Replace(text, "[LINK]");
         text = EmailRegex().Replace(text, "[EMAIL]");
+        text = UrlRegex().Replace(text, "[LINK]");
+        text = InternalHostRegex().Replace(text, "[INTERNAL_LINK]");
         text = MentionRegex().Replace(text, "[PERSON]");
         text = HandleRegex().Replace(text, "[PERSON]");
+        text = AddressedPersonRegex().Replace(text, "$1 [PERSON]");
         text = TokenRegex().Replace(text, "$1[SECRET]");
         text = IpRegex().Replace(text, "[IP_ADDRESS]");
         text = PhoneRegex().Replace(text, "[PHONE]");
@@ -164,7 +165,7 @@ public sealed partial class TextProcessingService(IOptions<PipelineOptions>? con
         var subcategory = ClassifySubcategory(primary);
         if (subcategory == "OTHER") subcategory = ClassifySubcategory(resolution.ToLowerInvariant());
 
-        if (ContainsAny(app, "hrms", "tms")) return ("HRMS", subcategory);
+        if (ContainsAny(app, "hrms", "tms", "timesheet")) return ("HRMS", subcategory == "OTHER" ? "HR_OPERATIONS" : subcategory);
         if (app.Contains("dashboard")) return ("DASHBOARD", subcategory);
         if (app.Contains("crm")) return ("CRM", subcategory);
         if (app.Contains("poa")) return ("POA", subcategory);
@@ -172,9 +173,24 @@ public sealed partial class TextProcessingService(IOptions<PipelineOptions>? con
         if (app.Contains("c-ticket")) return ("C_TICKET", subcategory);
         if (app.Contains("c-hub")) return ("C_HUB", subcategory);
         if (app.Contains("oms")) return ("OMS", subcategory);
+        if (ContainsAny(app, "mms", "resource planning")) return ("RESOURCE", subcategory);
+        if (ContainsAny(app, "sale", "sales")) return ("SALES", subcategory);
+        if (ContainsAny(app, "ams", "business application")) return ("BUSINESS_APP", subcategory);
+        if (ContainsAny(app, "finance", "billing")) return ("FINANCE", subcategory);
+        if (ContainsAny(app, "identity", "access")) return ("ACCESS", subcategory == "OTHER" ? "AUTHORIZATION" : subcategory);
+        if (ContainsAny(app, "reporting", "analytics")) return ("REPORTING", subcategory);
+        if (app.Contains("collaboration")) return ("COLLABORATION", subcategory);
+        if (app.Contains("document")) return ("DOCUMENT", subcategory);
+        if (app.Contains("procurement")) return ("PROCUREMENT", subcategory);
+        if (app.Contains("asset")) return ("ASSET", subcategory);
+        if (app.Contains("api")) return ("INTEGRATION", "API");
         if (ContainsAny(app, "jira", "wiki")) return ("JIRA_WIKI", subcategory);
         if (app.Equals("ec", StringComparison.OrdinalIgnoreCase)) return ("EC", subcategory);
-        if (subcategory == "ACCESS") return ("ACCESS", "AUTHORIZATION");
+        if (subcategory is "ACCESS" or "BADGE") return ("ACCESS", subcategory == "BADGE" ? "PHYSICAL_BADGE" : "AUTHORIZATION");
+        if (ContainsAny(value, "dashboard", "biểu đồ", "chart", "báo cáo")) return ("DASHBOARD", subcategory);
+        if (ContainsAny(value, "crm", "pipeline", "opportunity", "khách hàng")) return ("CRM", subcategory == "OTHER" ? "PIPELINE" : subcategory);
+        if (ContainsAny(value, "hrms", "timesheet", "chấm công", "ngày công")) return ("HRMS", subcategory == "OTHER" ? "HR_OPERATIONS" : subcategory);
+        if (ContainsAny(value, "poa", "approval", "phê duyệt", "luồng duyệt")) return ("POA", subcategory == "OTHER" ? "WORKFLOW" : subcategory);
         if (ContainsAny(value, "invoice", "payment", "payroll", "finance", "hóa đơn")) return ("FINANCE", subcategory);
         if (ContainsAny(value, "maternity", "leave policy", "human resource", "nhân sự")) return ("HR", subcategory);
         if (ContainsAny(value, "laptop", "device", "warranty", "asset")) return ("ASSET", subcategory);
@@ -185,7 +201,12 @@ public sealed partial class TextProcessingService(IOptions<PipelineOptions>? con
     }
 
     private static string ClassifySubcategory(string value) =>
-        ContainsAny(value, "chấm công", "checkout", "check out", "check-in", "checkin", "timesheet", "ngày công", "giờ công") ? "TIMESHEET"
+        ContainsAny(value, "dây thẻ", "thẻ nhân viên", "access card", "badge", "thẻ ra vào") ? "BADGE"
+        : ContainsAny(value, "chấm công", "checkout", "check out", "check-in", "checkin", "timesheet", "ngày công", "giờ công", "giờ out", "giờ vào", "tính công") ? "TIMESHEET"
+        : ContainsAny(value, "ca làm việc", "work shift", "working shift") ? "WORK_SHIFT"
+        : ContainsAny(value, "explanation request", "giải trình") ? "EXPLANATION"
+        : ContainsAny(value, "nghỉ phép", "annual leave", "leave balance") ? "LEAVE"
+        : ContainsAny(value, "ldap", "unlock account", "mở khóa tài khoản") ? "ACCESS"
         : ContainsAny(value, "invoice", "payment", "hóa đơn", " inv ") ? "INVOICE"
         : ContainsAny(value, "login", "403", "access", "permission", "role", "quyền", "phân quyền") ? "ACCESS"
         : ContainsAny(value, "pipeline", "workflow", "approve", "approver", "submit", "luồng duyệt") ? "WORKFLOW"
@@ -203,7 +224,7 @@ public sealed partial class TextProcessingService(IOptions<PipelineOptions>? con
 
     private static Dictionary<string, double> BuildEmbedding(string value, bool includeCharacterTrigrams = true)
     {
-        var tokens = WordRegex().Matches(value.ToLowerInvariant()).Select(match => match.Value).Where(token => token.Length > 2 && !StopWords.Contains(token)).ToArray();
+        var tokens = WordRegex().Matches(Canonicalize(value)).Select(match => match.Value).Where(token => token.Length > 2 && !StopWords.Contains(token)).ToArray();
         var vector = new Dictionary<string, double>(StringComparer.Ordinal);
         foreach (var token in tokens) Add(vector, $"w:{token}", 2);
         for (var index = 0; index + 1 < tokens.Length; index++) Add(vector, $"b:{tokens[index]}_{tokens[index + 1]}", 3);
@@ -228,10 +249,30 @@ public sealed partial class TextProcessingService(IOptions<PipelineOptions>? con
         vector[feature] = vector.TryGetValue(feature, out var current) ? current + weight : weight;
 
     private static HashSet<string> Tokenize(string value) =>
-        WordRegex().Matches(value.ToLowerInvariant())
+        WordRegex().Matches(Canonicalize(value))
             .Select(match => match.Value)
             .Where(token => token.Length > 2 && !StopWords.Contains(token))
             .ToHashSet(StringComparer.OrdinalIgnoreCase);
+
+    private static string Canonicalize(string value)
+    {
+        var normalized = value.ToLowerInvariant();
+        foreach (var (pattern, replacement) in SemanticPhrases)
+            normalized = Regex.Replace(normalized, pattern, replacement, RegexOptions.CultureInvariant);
+        return normalized;
+    }
+
+    private static readonly (string Pattern, string Replacement)[] SemanticPhrases =
+    [
+        (@"\b(check[ -]?in|check[ -]?out|ngày công|giờ công|chấm công|timesheet)\b", " attendance "),
+        (@"\b(dây thẻ|thẻ nhân viên|access card|badge|thẻ ra vào)\b", " physical_badge "),
+        (@"\b(log[ -]?in|đăng nhập|sign[ -]?in)\b", " authentication "),
+        (@"\b(phân quyền|cấp quyền|permission|authorization|role)\b", " authorization "),
+        (@"\b(pineline|pipeline|sales funnel)\b", " sales_pipeline "),
+        (@"\b(hóa đơn|invoice|billing)\b", " invoice "),
+        (@"\b(phê duyệt|approve|approval|approver)\b", " approval_workflow "),
+        (@"\b(end date|ngày kết thúc|deadline)\b", " end_date ")
+    ];
 
     private static string CleanSentence(string value) => WhitespaceRegex().Replace(value, " ").Trim(' ', '-', '.', ':');
     private static bool IsBoilerplateSentence(string sentence)
@@ -245,10 +286,14 @@ public sealed partial class TextProcessingService(IOptions<PipelineOptions>? con
 
     [GeneratedRegex("<[^>]+>")]
     private static partial Regex HtmlRegex();
+    [GeneratedRegex("(?is)<span[^>]*class\\s*=\\s*['\"]mention['\"][^>]*>.*?</span>")]
+    private static partial Regex MentionElementRegex();
     [GeneratedRegex(@"\[\s*Comment\s+\d+\s*\]", RegexOptions.IgnoreCase)]
     private static partial Regex CommentLabelRegex();
     [GeneratedRegex(@"https?://[^\s<>""]+", RegexOptions.IgnoreCase)]
     private static partial Regex UrlRegex();
+    [GeneratedRegex("(?i)\\b(?:pms|c-ticket-api|jira|wiki)\\.cmcglobal\\.com\\.vn(?:/[^\\s<>\"']*)?")]
+    private static partial Regex InternalHostRegex();
     [GeneratedRegex(@"[{}\[\]|*_~^]+")]
     private static partial Regex JiraMarkupRegex();
     [GeneratedRegex(@"\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}\b", RegexOptions.IgnoreCase)]
@@ -257,6 +302,8 @@ public sealed partial class TextProcessingService(IOptions<PipelineOptions>? con
     private static partial Regex MentionRegex();
     [GeneratedRegex(@"(?<![\p{L}\p{N}])@[A-Z0-9._-]{2,}", RegexOptions.IgnoreCase)]
     private static partial Regex HandleRegex();
+    [GeneratedRegex(@"(?i)\b(bạn|anh|chị|mr\.?|ms\.?)\s+(?:[A-ZĐ][\p{L}0-9._-]+(?:\s+|-)){1,5}[A-ZĐ][\p{L}0-9._-]+")]
+    private static partial Regex AddressedPersonRegex();
     [GeneratedRegex(@"(?i)(bearer\s+|api[_ -]?key\s*[:=]\s*|token\s*[:=]\s*)[A-Za-z0-9._-]{8,}")]
     private static partial Regex TokenRegex();
     [GeneratedRegex(@"\b(?:(?:25[0-5]|2[0-4]\d|1?\d?\d)\.){3}(?:25[0-5]|2[0-4]\d|1?\d?\d)\b")]

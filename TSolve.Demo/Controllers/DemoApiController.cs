@@ -6,7 +6,7 @@ namespace TSolve.Demo.Controllers;
 
 [ApiController]
 [Route("api/demo")]
-public sealed class DemoApiController(DemoStore store) : ControllerBase
+public sealed class DemoApiController(IStateStore store) : ControllerBase
 {
     [HttpGet("summary")]
     public async Task<IActionResult> Summary()

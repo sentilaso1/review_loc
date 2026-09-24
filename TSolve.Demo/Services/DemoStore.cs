@@ -2,7 +2,14 @@ using TSolve.Demo.Models;
 
 namespace TSolve.Demo.Services;
 
-public sealed class DemoStore
+public interface IStateStore
+{
+    Task<T> ReadAsync<T>(Func<DemoState, T> reader);
+    Task<T> WriteAsync<T>(Func<DemoState, T> writer);
+    Task ResetAsync();
+}
+
+public sealed class DemoStore : IStateStore
 {
     private readonly SemaphoreSlim _gate = new(1, 1);
     private DemoState _state = new();

@@ -30,14 +30,19 @@ public sealed class ExcelTicketReader
 
         using var archive = new ZipArchive(new MemoryStream(bytes), ZipArchiveMode.Read);
         var sharedStrings = ReadSharedStrings(archive);
-        var sheet = LoadXml(GetFirstWorksheet(archive));
-        var rows = sheet.Descendants(Spreadsheet + "row").ToList();
-        if (rows.Count == 0) throw new InvalidDataException("The first worksheet has no rows.");
-
-        var headerRow = rows.FirstOrDefault(row => ReadRow(row, sharedStrings).Values.Any(value => !string.IsNullOrWhiteSpace(value)))
-            ?? throw new InvalidDataException("The first worksheet has no header row.");
+        var sheets = GetWorksheets(archive).Select(LoadXml).ToList();
+        var selected = sheets.Select(sheet => new
+            {
+                Rows = sheet.Descendants(Spreadsheet + "row").ToList(),
+                Header = sheet.Descendants(Spreadsheet + "row").FirstOrDefault(row =>
+                    ReadRow(row, sharedStrings).Values.Select(NormalizeHeader).Contains("summary"))
+            })
+            .FirstOrDefault(item => item.Header is not null)
+            ?? throw new InvalidDataException("No worksheet contains the required ticket headers.");
+        var rows = selected.Rows;
+        var headerRow = selected.Header!;
         var headers = ReadRow(headerRow, sharedStrings)
-            .ToDictionary(cell => cell.Key, cell => cell.Value.Trim().ToLowerInvariant());
+            .ToDictionary(cell => cell.Key, cell => NormalizeHeader(cell.Value));
         var columns = RequiredHeaders.ToDictionary(name => name, name => headers.FirstOrDefault(header => header.Value == name).Key);
         var missing = columns.Where(column => column.Value == 0).Select(column => column.Key).ToArray();
         if (missing.Length > 0) throw new InvalidDataException($"Missing required column(s): {string.Join(", ", missing)}.");
@@ -86,18 +91,33 @@ public sealed class ExcelTicketReader
         return tickets;
     }
 
-    private static ZipArchiveEntry GetFirstWorksheet(ZipArchive archive)
+    private static IReadOnlyList<ZipArchiveEntry> GetWorksheets(ZipArchive archive)
     {
         var workbook = LoadXml(RequiredEntry(archive, "xl/workbook.xml"));
-        var relationshipId = workbook.Descendants(Spreadsheet + "sheet").FirstOrDefault()?.Attribute(Relationships + "id")?.Value
-            ?? throw new InvalidDataException("The workbook has no worksheet.");
         var relationships = LoadXml(RequiredEntry(archive, "xl/_rels/workbook.xml.rels"));
-        var target = relationships.Descendants(PackageRelationships + "Relationship")
-            .FirstOrDefault(item => (string?)item.Attribute("Id") == relationshipId)?.Attribute("Target")?.Value
-            ?? throw new InvalidDataException("The first worksheet relationship is missing.");
-        var normalized = target.Replace('\\', '/').TrimStart('/');
-        var path = normalized.StartsWith("xl/", StringComparison.OrdinalIgnoreCase) ? normalized : $"xl/{normalized}";
-        return RequiredEntry(archive, path);
+        var entries = new List<ZipArchiveEntry>();
+        foreach (var sheet in workbook.Descendants(Spreadsheet + "sheet"))
+        {
+            var relationshipId = sheet.Attribute(Relationships + "id")?.Value;
+            var target = relationships.Descendants(PackageRelationships + "Relationship")
+                .FirstOrDefault(item => (string?)item.Attribute("Id") == relationshipId)?.Attribute("Target")?.Value;
+            if (target is null) continue;
+            var normalized = target.Replace('\\', '/').TrimStart('/');
+            var path = normalized.StartsWith("xl/", StringComparison.OrdinalIgnoreCase) ? normalized : $"xl/{normalized}";
+            entries.Add(RequiredEntry(archive, path));
+        }
+        return entries.Count > 0 ? entries : throw new InvalidDataException("The workbook has no worksheet.");
+    }
+
+    private static string NormalizeHeader(string value)
+    {
+        var header = value.Trim().ToLowerInvariant().Replace('_', ' ');
+        return header switch
+        {
+            "original comment" or "comment text" => "comment",
+            "internal ticket id" => "internal_ticket_id",
+            _ => header
+        };
     }
 
     private static List<string> ReadSharedStrings(ZipArchive archive)

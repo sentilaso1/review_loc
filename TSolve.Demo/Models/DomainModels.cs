@@ -141,6 +141,21 @@ public sealed class SimilarityLink
     public DateTimeOffset CreatedAt { get; init; } = DateTimeOffset.UtcNow;
 }
 
+public sealed class AIRun
+{
+    public Guid Id { get; init; } = Guid.NewGuid();
+    public required Guid ClusterId { get; init; }
+    public List<Guid> TicketIds { get; init; } = [];
+    public required string Model { get; init; }
+    public required string PromptHash { get; init; }
+    public required string Provider { get; init; }
+    public int LatencyMs { get; init; }
+    public decimal Cost { get; init; }
+    public bool InputWasMasked { get; init; }
+    public string Outcome { get; init; } = "completed";
+    public DateTimeOffset CreatedAt { get; init; } = DateTimeOffset.UtcNow;
+}
+
 public sealed class AuditEntry
 {
     public DateTimeOffset At { get; init; } = DateTimeOffset.UtcNow;
@@ -156,6 +171,7 @@ public sealed class DemoState
     public List<KnowledgeSolution> Solutions { get; init; } = [];
     public List<ReviewTask> Reviews { get; init; } = [];
     public List<SimilarityLink> SimilarityLinks { get; init; } = [];
+    public List<AIRun> AIRuns { get; init; } = [];
     public List<PipelineRun> Runs { get; init; } = [];
     public List<AuditEntry> Audit { get; init; } = [];
     public int DailySyncNumber { get; set; }
