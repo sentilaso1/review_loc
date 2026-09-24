@@ -151,6 +151,18 @@ public sealed class PipelineRegressionTests
     }
 
     [Fact]
+    public void Embedding_IsDeterministicNormalizedAnd384Dimensional()
+    {
+        var text = new TextProcessingService();
+        var first = text.Embedding("Cannot update the dashboard task end date");
+        var second = text.Embedding("Cannot update the dashboard task end date");
+
+        Assert.Equal(384, first.Length);
+        Assert.Equal(first, second);
+        Assert.Equal(1, Math.Sqrt(first.Sum(value => value * value)), 10);
+    }
+
+    [Fact]
     public async Task PublishedSolutionMatch_ReturnsConfidenceAndAutoLinks()
     {
         var (pipeline, store) = Pipeline(new PipelineOptions { PublishedMatchThreshold = 0.10 });

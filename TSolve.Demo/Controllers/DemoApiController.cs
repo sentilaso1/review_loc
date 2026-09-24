@@ -6,7 +6,7 @@ namespace TSolve.Demo.Controllers;
 
 [ApiController]
 [Route("api/demo")]
-public sealed class DemoApiController(IStateStore store) : ControllerBase
+public sealed class DemoApiController(IStateStore store, PostgresStateStore vectors) : ControllerBase
 {
     [HttpGet("summary")]
     public async Task<IActionResult> Summary()
@@ -28,5 +28,18 @@ public sealed class DemoApiController(IStateStore store) : ControllerBase
             latestRun = state.Runs.FirstOrDefault()
         });
         return Ok(result);
+    }
+
+    [HttpGet("tickets/{ticketId:guid}/similar")]
+    public async Task<IActionResult> SimilarTickets(Guid ticketId, [FromQuery] int limit = 10, CancellationToken cancellationToken = default)
+    {
+        var matches = await vectors.FindSimilarTicketsAsync(ticketId, limit, cancellationToken);
+        var tickets = await store.ReadAsync(state => state.Tickets.ToDictionary(ticket => ticket.Id));
+        return Ok(matches.Select(match => new
+        {
+            ticketId = match.TicketId,
+            externalId = tickets.GetValueOrDefault(match.TicketId)?.ExternalId,
+            score = match.Score
+        }));
     }
 }

@@ -39,4 +39,40 @@ public sealed class PostgresStateStoreTests
         var records = await restarted.ReadAsync(state => state.Audit.Count(entry => entry.Action == "CONCURRENT_TEST"));
         Assert.Equal(2, records);
     }
+
+    [Fact]
+    public async Task PostgreSql_PersistsEmbeddings_AndSearchesWithPgvector_WhenConfigured()
+    {
+        var url = Environment.GetEnvironmentVariable("TEST_DATABASE_URL");
+        if (string.IsNullOrWhiteSpace(url)) return;
+
+        var store = new PostgresStateStore(Microsoft.Extensions.Options.Options.Create(new DatabaseOptions { Url = url }));
+        await store.InitializeAsync();
+        await store.ResetAsync();
+        var query = Ticket("V-1", "Dashboard task end date cannot update", "Check permissions and update the task end date");
+        var related = Ticket("V-2", "Unable to update dashboard task end date", "Verify permission then change the task end date");
+        var unrelated = Ticket("V-3", "Printer queue is blocked", "Clear the print queue and restart the spooler");
+        await store.WriteAsync(state => { state.Tickets.AddRange([query, related, unrelated]); return true; });
+
+        var matches = await store.FindSimilarTicketsAsync(query.Id, 2);
+
+        Assert.Equal(related.Id, matches[0].TicketId);
+        Assert.True(matches[0].Score > matches[1].Score);
+    }
+
+    private static TicketRecord Ticket(string externalId, string title, string resolution) => new()
+    {
+        Source = "Test",
+        ExternalId = externalId,
+        SourceUrl = $"test://{externalId}",
+        Title = title,
+        CleanTitle = title,
+        CleanDescription = title,
+        CleanResolution = resolution,
+        Workspace = "GENERAL",
+        Category = "GENERAL",
+        Subcategory = "OTHER",
+        Decision = ProcessingDecision.CandidateEligible,
+        ResolvedAt = DateTimeOffset.UtcNow
+    };
 }

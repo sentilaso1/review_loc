@@ -271,6 +271,15 @@ public sealed class KnowledgePipelineService(
 
         foreach (var taxonomy in candidates)
         {
+            var similarities = new Dictionary<(Guid Left, Guid Right), double>();
+            double Similarity(TicketRecord left, TicketRecord right)
+            {
+                var key = left.Id.CompareTo(right.Id) <= 0 ? (left.Id, right.Id) : (right.Id, left.Id);
+                if (!similarities.TryGetValue(key, out var score))
+                    similarities[key] = score = ClusterSimilarity(left, right);
+                return score;
+            }
+
             var partitions = taxonomy.Select(ticket => new List<TicketRecord> { ticket }).ToList();
             while (partitions.Count > 1)
             {
@@ -281,7 +290,7 @@ public sealed class KnowledgePipelineService(
                 for (var right = left + 1; right < partitions.Count; right++)
                 {
                     // True complete-link: the least-similar cross-pair controls whether two groups may merge.
-                    var score = partitions[left].SelectMany(a => partitions[right].Select(b => ClusterSimilarity(a, b))).Min();
+                    var score = partitions[left].SelectMany(a => partitions[right].Select(b => Similarity(a, b))).Min();
                     if (score > bestScore + 1e-12)
                     {
                         bestScore = score;
@@ -298,7 +307,7 @@ public sealed class KnowledgePipelineService(
             foreach (var members in partitions)
             {
                 var representative = members
-                    .OrderByDescending(candidate => members.Average(other => ClusterSimilarity(candidate, other)))
+                    .OrderByDescending(candidate => members.Average(other => Similarity(candidate, other)))
                     .ThenBy(candidate => candidate.ExternalId, StringComparer.Ordinal).First();
                 var cluster = new TicketCluster
                 {

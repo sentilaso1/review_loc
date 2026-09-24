@@ -14,15 +14,19 @@ public sealed class PostgresStateStore : IStateStore
     private readonly Uri _databaseUri;
     private readonly SemaphoreSlim _gate = new(1, 1);
     private readonly string _psqlPath;
+    private readonly string? _psqlContainer;
+    private readonly TextProcessingService _text;
     private static readonly JsonSerializerOptions Json = new(JsonSerializerDefaults.Web);
 
-    public PostgresStateStore(IOptions<DatabaseOptions> options)
+    public PostgresStateStore(IOptions<DatabaseOptions> options, TextProcessingService? text = null)
     {
         var value = Environment.GetEnvironmentVariable("DATABASE_URL") ?? options.Value.Url;
         if (!Uri.TryCreate(value, UriKind.Absolute, out _databaseUri!) ||
             (_databaseUri.Scheme != "postgresql" && _databaseUri.Scheme != "postgres"))
             throw new InvalidOperationException("DATABASE_URL must be a postgresql:// URI. PostgreSQL is authoritative; there is no in-memory fallback.");
-        _psqlPath = ResolvePsql();
+        _psqlContainer = Environment.GetEnvironmentVariable("PSQL_CONTAINER");
+        _psqlPath = ResolvePsql(_psqlContainer);
+        _text = text ?? new TextProcessingService();
     }
 
     public async Task InitializeAsync(CancellationToken cancellationToken = default)
@@ -72,6 +76,33 @@ public sealed class PostgresStateStore : IStateStore
         return true;
     });
 
+    public async Task<IReadOnlyList<VectorMatch>> FindSimilarTicketsAsync(Guid ticketId, int limit = 10, CancellationToken cancellationToken = default)
+    {
+        limit = Math.Clamp(limit, 1, 100);
+        var sql = $"""
+            WITH query AS (
+                SELECT id, workspace_id, embedding
+                FROM resolved_ticket_snapshot
+                WHERE id = {U(ticketId)} AND embedding IS NOT NULL
+            )
+            SELECT candidate.id::text || E'\t' ||
+                   (1 - (candidate.embedding <=> query.embedding))::text
+            FROM resolved_ticket_snapshot candidate
+            CROSS JOIN query
+            WHERE candidate.id <> query.id
+              AND candidate.workspace_id = query.workspace_id
+              AND candidate.embedding IS NOT NULL
+            ORDER BY candidate.embedding <=> query.embedding
+            LIMIT {limit};
+            """;
+        var output = await RunPsqlAsync(sql, _databaseUri, cancellationToken);
+        return output.Output.Split('\n', StringSplitOptions.RemoveEmptyEntries)
+            .Select(line => line.Split('\t', 2))
+            .Where(parts => parts.Length == 2 && Guid.TryParse(parts[0], out _) && double.TryParse(parts[1], NumberStyles.Float, CultureInfo.InvariantCulture, out _))
+            .Select(parts => new VectorMatch(Guid.Parse(parts[0]), double.Parse(parts[1], CultureInfo.InvariantCulture)))
+            .ToArray();
+    }
+
     private async Task<DemoState> LoadAsync()
     {
         var output = await RunPsqlAsync("SELECT payload::text FROM tsolve_state_metadata WHERE singleton;", _databaseUri, CancellationToken.None);
@@ -86,7 +117,8 @@ public sealed class PostgresStateStore : IStateStore
         sql.Append("TRUNCATE evidence, knowledge_candidate, cluster_member, solution_source, reuse_record, similarity_link, solution_approval, ai_run, audit_event, pipeline_run, solution, \"cluster\", resolved_ticket_snapshot RESTART IDENTITY CASCADE; ");
         foreach (var ticket in state.Tickets)
         {
-            sql.Append($"INSERT INTO resolved_ticket_snapshot(id,source,external_ticket_id,workspace_id,category,status,decision,cluster_id,payload) VALUES({U(ticket.Id)},{Q(ticket.Source)},{Q(ticket.ExternalId)},{Q(ticket.Workspace)},{Q(ticket.Category)},{Q(ticket.Status)},{Q(ticket.Decision.ToString())},{UN(ticket.ClusterId)},{J(ticket)}); ");
+            var embedding = _text.Embedding($"{ticket.CleanTitle} {ticket.CleanDescription} {ticket.CleanResolution}");
+            sql.Append($"INSERT INTO resolved_ticket_snapshot(id,source,external_ticket_id,workspace_id,category,status,decision,cluster_id,embedding,payload) VALUES({U(ticket.Id)},{Q(ticket.Source)},{Q(ticket.ExternalId)},{Q(ticket.Workspace)},{Q(ticket.Category)},{Q(ticket.Status)},{Q(ticket.Decision.ToString())},{UN(ticket.ClusterId)},{V(embedding)},{J(ticket)}); ");
             if (!string.IsNullOrWhiteSpace(ticket.CleanResolution))
                 sql.Append($"INSERT INTO evidence(id,ticket_id,kind,content) VALUES({U(Guid.NewGuid())},{U(ticket.Id)},'clean_resolution',{Q(ticket.CleanResolution)}); ");
             if (ticket.Decision == ProcessingDecision.CandidateEligible)
@@ -121,13 +153,25 @@ public sealed class PostgresStateStore : IStateStore
             RedirectStandardInput = true, RedirectStandardOutput = true, RedirectStandardError = true,
             UseShellExecute = false, CreateNoWindow = true
         };
+        if (!string.IsNullOrWhiteSpace(_psqlContainer))
+        {
+            start.ArgumentList.Add("exec"); start.ArgumentList.Add("-i");
+            if (credentials.Length > 1)
+            {
+                start.ArgumentList.Add("-e");
+                start.ArgumentList.Add("PGPASSWORD");
+            }
+            start.ArgumentList.Add(_psqlContainer);
+            start.ArgumentList.Add("psql");
+        }
         start.ArgumentList.Add("-X"); start.ArgumentList.Add("-q"); start.ArgumentList.Add("-t"); start.ArgumentList.Add("-A");
         start.ArgumentList.Add("-v"); start.ArgumentList.Add("ON_ERROR_STOP=1");
         start.ArgumentList.Add("--host"); start.ArgumentList.Add(uri.Host);
         start.ArgumentList.Add("--port"); start.ArgumentList.Add((uri.IsDefaultPort ? 5432 : uri.Port).ToString(CultureInfo.InvariantCulture));
         start.ArgumentList.Add("--username"); start.ArgumentList.Add(Uri.UnescapeDataString(credentials[0]));
         start.ArgumentList.Add("--dbname"); start.ArgumentList.Add(uri.AbsolutePath.Trim('/'));
-        if (credentials.Length > 1) start.Environment["PGPASSWORD"] = Uri.UnescapeDataString(credentials[1]);
+        if (credentials.Length > 1)
+            start.Environment["PGPASSWORD"] = Uri.UnescapeDataString(credentials[1]);
         using var process = Process.Start(start) ?? throw new InvalidOperationException("Unable to start psql.");
         var stdout = process.StandardOutput.ReadToEndAsync(cancellationToken);
         var stderr = process.StandardError.ReadToEndAsync(cancellationToken);
@@ -139,14 +183,17 @@ public sealed class PostgresStateStore : IStateStore
         return result;
     }
 
-    private static string ResolvePsql()
+    private static string ResolvePsql(string? container)
     {
         var configured = Environment.GetEnvironmentVariable("PSQL_PATH");
         if (!string.IsNullOrWhiteSpace(configured) && File.Exists(configured)) return configured;
         var programFiles = Environment.GetFolderPath(Environment.SpecialFolder.ProgramFiles);
         var root = Path.Combine(programFiles, "PostgreSQL");
         var found = Directory.Exists(root) ? Directory.GetDirectories(root).OrderByDescending(path => path).Select(path => Path.Combine(path, "bin", "psql.exe")).FirstOrDefault(File.Exists) : null;
-        return found ?? throw new InvalidOperationException("psql was not found. Install PostgreSQL client tools or set PSQL_PATH.");
+        if (found is not null) return found;
+        var docker = Path.Combine(programFiles, "Docker", "Docker", "resources", "bin", "docker.exe");
+        if (!string.IsNullOrWhiteSpace(container) && File.Exists(docker)) return docker;
+        throw new InvalidOperationException("psql was not found. Install PostgreSQL client tools, set PSQL_PATH, or set PSQL_CONTAINER for Docker.");
     }
 
     private static string Q(string value) => $"'{value.Replace("'", "''")}'";
@@ -154,8 +201,11 @@ public sealed class PostgresStateStore : IStateStore
     private static string U(Guid value) => Q(value.ToString()) + "::uuid";
     private static string UN(Guid? value) => value is null ? "NULL" : U(value.Value);
     private static string D(double value) => value.ToString("R", CultureInfo.InvariantCulture);
+    private static string V(IEnumerable<double> values) => Q($"[{string.Join(',', values.Select(D))}]") + "::vector";
     private sealed record PsqlResult(int ExitCode, string Output, string Error);
 }
+
+public sealed record VectorMatch(Guid TicketId, double Score);
 
 public sealed class DatabaseInitializer(PostgresStateStore store, ILogger<DatabaseInitializer> logger) : IHostedService
 {

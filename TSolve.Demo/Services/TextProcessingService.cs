@@ -64,6 +64,23 @@ public sealed partial class TextProcessingService(IOptions<PipelineOptions>? con
 
     public double TitleSimilarity(string left, string right) => Cosine(BuildEmbedding(left, includeCharacterTrigrams: true), BuildEmbedding(right, includeCharacterTrigrams: true));
 
+    public double[] Embedding(string value)
+    {
+        const int dimensions = 384;
+        var dense = new double[dimensions];
+        foreach (var (feature, weight) in BuildEmbedding(value))
+        {
+            var hash = SHA256.HashData(Encoding.UTF8.GetBytes(feature));
+            var index = (hash[0] << 8 | hash[1]) % dimensions;
+            dense[index] += (hash[2] & 1) == 0 ? weight : -weight;
+        }
+
+        var norm = Math.Sqrt(dense.Sum(component => component * component));
+        if (norm > 0)
+            for (var index = 0; index < dense.Length; index++) dense[index] /= norm;
+        return dense;
+    }
+
     public string Hash(string value) => Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(value)));
 
     public string MaskSensitive(string? value) => NormalizeAndMask(value);

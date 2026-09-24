@@ -30,7 +30,11 @@ dotnet restore TSolve.sln
 dotnet run --project TSolve.Demo
 ```
 
-On first startup the application creates `tsolve_dev` when necessary and applies the versioned SQL migration in `TSolve.Demo/Database/Migrations`. It uses the installed `psql` client (override with `PSQL_PATH`) so the data layer can run in restricted/offline environments without downloading a database driver. Writes are serialized, wrapped in a PostgreSQL transaction, and protected by an advisory lock. The schema includes the core T-Solve entities, database-level `(source, external_ticket_id)` uniqueness, filter indexes, `vector(384)`, and an HNSW cosine index.
+On first startup the application creates `tsolve_dev` when necessary and applies the versioned SQL migration in `TSolve.Demo/Database/Migrations`. It uses the installed `psql` client (override with `PSQL_PATH`) so the data layer can run in restricted/offline environments without downloading a database driver. Writes are serialized, wrapped in a PostgreSQL transaction, and protected by an advisory lock. Every ticket stores a normalized 384-dimensional embedding in pgvector; nearest-neighbor search uses cosine distance through an HNSW index. Startup fails if pgvector is unavailable.
+
+Use `GET /api/demo/tickets/{ticketId}/similar?limit=10` to retrieve nearest tickets from pgvector.
+
+When PostgreSQL runs in Docker and no Windows `psql.exe` is installed, set `PSQL_CONTAINER` to the running container name (for example `postgres-vector`).
 
 Open the URL printed by ASP.NET Core. The application starts in deterministic `Mock Jira` mode.
 

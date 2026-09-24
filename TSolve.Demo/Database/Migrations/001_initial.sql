@@ -1,11 +1,4 @@
-DO $$
-BEGIN
-    IF EXISTS (SELECT 1 FROM pg_available_extensions WHERE name = 'vector') THEN
-        CREATE EXTENSION IF NOT EXISTS vector;
-    ELSE
-        RAISE NOTICE 'pgvector is not installed; using nullable double precision[] embedding fallback';
-    END IF;
-END $$;
+CREATE EXTENSION IF NOT EXISTS vector;
 
 CREATE TABLE IF NOT EXISTS resolved_ticket_snapshot (
     id uuid PRIMARY KEY,
@@ -25,27 +18,23 @@ CREATE INDEX IF NOT EXISTS ix_ticket_status_decision ON resolved_ticket_snapshot
 CREATE INDEX IF NOT EXISTS ix_ticket_cluster ON resolved_ticket_snapshot(cluster_id);
 DO $$
 BEGIN
-    IF EXISTS (SELECT 1 FROM pg_extension WHERE extname = 'vector') THEN
-        ALTER TABLE resolved_ticket_snapshot ADD COLUMN IF NOT EXISTS embedding vector(384) NULL;
-        IF EXISTS (
-            SELECT 1
-            FROM information_schema.columns
-            WHERE table_schema = 'public'
-              AND table_name = 'resolved_ticket_snapshot'
-              AND column_name = 'embedding'
-              AND udt_name <> 'vector'
-        ) THEN
-            ALTER TABLE resolved_ticket_snapshot
-                ALTER COLUMN embedding TYPE vector(384)
-                USING CASE
-                    WHEN embedding IS NULL THEN NULL
-                    ELSE ('[' || array_to_string(embedding, ',') || ']')::vector(384)
-                END;
-        END IF;
-        EXECUTE 'CREATE INDEX IF NOT EXISTS ix_ticket_embedding_hnsw ON resolved_ticket_snapshot USING hnsw (embedding vector_cosine_ops)';
-    ELSE
-        ALTER TABLE resolved_ticket_snapshot ADD COLUMN IF NOT EXISTS embedding double precision[] NULL;
+    ALTER TABLE resolved_ticket_snapshot ADD COLUMN IF NOT EXISTS embedding vector(384) NULL;
+    IF EXISTS (
+        SELECT 1
+        FROM information_schema.columns
+        WHERE table_schema = 'public'
+          AND table_name = 'resolved_ticket_snapshot'
+          AND column_name = 'embedding'
+          AND udt_name <> 'vector'
+    ) THEN
+        ALTER TABLE resolved_ticket_snapshot
+            ALTER COLUMN embedding TYPE vector(384)
+            USING CASE
+                WHEN embedding IS NULL THEN NULL
+                ELSE ('[' || array_to_string(embedding, ',') || ']')::vector(384)
+            END;
     END IF;
+    EXECUTE 'CREATE INDEX IF NOT EXISTS ix_ticket_embedding_hnsw ON resolved_ticket_snapshot USING hnsw (embedding vector_cosine_ops)';
 END $$;
 
 CREATE TABLE IF NOT EXISTS evidence (
